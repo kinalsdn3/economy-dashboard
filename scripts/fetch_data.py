@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """경제지표 대시보드 데이터 수집기.
 
-GitHub Actions 에서 하루 한 번 실행되어 data/data.json 을 갱신한다.
+GitHub Actions 에서 하루 두 번(07:10 미국 마감 반영, 18:30 한국 마감 반영) 실행되어 data/data.json 을 갱신한다.
 표준 라이브러리만 사용한다.
 
 환경변수(GitHub Secrets):
@@ -10,6 +10,7 @@ GitHub Actions 에서 하루 한 번 실행되어 data/data.json 을 갱신한�
   REB_API_KEY   한국부동산원 R-ONE
   DATA_GO_KR_KEY 공공데이터포털 (청약홈 분양정보, 없으면 입주 단지 목록은 수기 입력분만)
 """
+import calendar
 import csv
 import datetime as dt
 import email.utils
@@ -60,6 +61,14 @@ NEWS = {
     "spx": ("뉴욕증시 S&P500", 1.5), "ndx": ("나스닥 지수", 1.5), "dji": ("다우지수", 1.5),
     "vix": ("VIX 공포지수", 15.0), "gold": ("국제 금값", 2.0),
 }
+# 미국 S&P 500 11개 섹터 ETF (SPDR) — 업종별 등락
+SECTORS = [
+    ("XLK", "정보기술"), ("XLC", "커뮤니케이션"), ("XLY", "임의소비재"), ("XLP", "필수소비재"),
+    ("XLE", "에너지"), ("XLF", "금융"), ("XLV", "헬스케어"), ("XLI", "산업재"),
+    ("XLB", "소재"), ("XLRE", "부동산"), ("XLU", "유틸리티"),
+]
+# 아침 실행(미국 마감 반영용)에서는 네이버 매물 수집을 건너뛴다 (하루 두 번 접속하면 차단 위험)
+SKIP_LISTINGS = os.environ.get("SKIP_LISTINGS") == "1"
 NAVER_LAND = "https://m.land.naver.com"
 SEOUL_CORTAR = "1100000000"
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -383,6 +392,38 @@ def seoul_listings(old):
             "source": "네이버 부동산", "asof": today, "history": history}
 
 
+def period_changes(series):
+    """마지막 종가 기준 1일 / 1주 / 1개월 / 연초 이후 등락률(%)."""
+    last_day, last = series[-1]
+    d = dt.date.fromisoformat(last_day)
+    m = d.month - 1 or 12
+    y = d.year - (d.month == 1)
+    month_ago = dt.date(y, m, min(d.day, calendar.monthrange(y, m)[1]))
+
+    def since(day):  # 그 날짜(포함) 이전 마지막 종가 대비
+        base = next((v for k, v in reversed(series) if k <= day.isoformat()), None)
+        return None if not base else round((last / base - 1) * 100, 2)
+    return {"1D": round((last / series[-2][1] - 1) * 100, 2),
+            "1W": since(d - dt.timedelta(days=7)), "1M": since(month_ago),
+            "YTD": since(dt.date(d.year - 1, 12, 31))}
+
+
+def us_sectors():
+    rows, errors = [], []
+    for sym, name in SECTORS:
+        try:
+            s = yahoo(sym)
+            rows.append({"sym": sym, "name": name, "asof": s[-1][0], "chg": period_changes(s)})
+        except Exception as e:  # noqa: BLE001 - 한두 개 빠져도 나머지는 보여 준다
+            errors.append(f"{sym}: {e}")
+    if len(rows) < 9:
+        raise RuntimeError(f"섹터 ETF {len(rows)}/11개만 수집 — {' / '.join(errors)}")
+    spy = yahoo("SPY")
+    return {"type": "sectors", "name": "미국 업종별 등락", "freq": "D", "source": "Yahoo Finance (SPDR 섹터 ETF)",
+            "asof": max(r["asof"] for r in rows), "rows": rows,
+            "bench": {"sym": "SPY", "name": "S&P 500", "chg": period_changes(spy)}}
+
+
 def news_headline(query, up):
     """구글 뉴스 RSS 에서 최근 이틀 안의 대표 헤드라인 하나 (제목·언론사·링크만 사용)."""
     for q in (f"{query} {'상승' if up else '하락'}", query):
@@ -580,6 +621,12 @@ def main():
             errors.append(f"{key} 뉴스: {e}")
 
     try:
+        ind["us_sectors"] = us_sectors()
+        print(f"  ✓ us_sectors ({ind['us_sectors']['asof']}, {len(ind['us_sectors']['rows'])}개)")
+    except Exception as e:  # noqa: BLE001
+        keep_old("us_sectors", e)
+
+    try:
         try:
             rows, source = naver_flows(), "네이버 증권"
         except Exception:  # noqa: BLE001 - 네이버 실패 시 ECOS 외국인 순매수만
@@ -599,11 +646,16 @@ def main():
         except Exception as e:  # noqa: BLE001
             keep_old(key, e)
 
-    try:
-        ind["re_listing_seoul"] = seoul_listings(old.get("re_listing_seoul"))
-        print(f"  ✓ re_listing_seoul (서울 매물 {ind['re_listing_seoul']['history']['서울'][-1][1:]})")
-    except Exception as e:  # noqa: BLE001
-        keep_old("re_listing_seoul", e)
+    if SKIP_LISTINGS:
+        if "re_listing_seoul" in old:
+            ind["re_listing_seoul"] = old["re_listing_seoul"]
+        print("  - re_listing_seoul (아침 실행이라 건너뜀)")
+    else:
+        try:
+            ind["re_listing_seoul"] = seoul_listings(old.get("re_listing_seoul"))
+            print(f"  ✓ re_listing_seoul (서울 매물 {ind['re_listing_seoul']['history']['서울'][-1][1:]})")
+        except Exception as e:  # noqa: BLE001
+            keep_old("re_listing_seoul", e)
 
     try:
         ind["re_supply_seoul"] = seoul_supply(errors)

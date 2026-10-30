@@ -11,6 +11,7 @@
     ],
     us: [
       { title: "지수", ids: ["spx", "ndx", "dji", "vix", "dxy"] },
+      { title: "업종별 등락 · 섹터 ETF", ids: ["us_sectors"] },
       { title: "금리", ids: ["fed", "ust2", "ust10", "ust30", "spread"] },
       { title: "금 · 해외 국채", ids: ["gold", "jgb3", "jgb10", "bund3", "bund10"] },
       { title: "물가 · 고용", ids: ["cpi", "unrate"] },
@@ -28,6 +29,7 @@
     samsung: "삼성전자", hynix: "SK하이닉스",
     kr_base: "한국 기준금리", ktb3: "국고채 3년", ktb10: "국고채 10년",
     spx: "S&P 500", ndx: "나스닥 종합", dji: "다우존스", vix: "VIX 공포지수", dxy: "달러인덱스",
+    us_sectors: "미국 업종별 등락",
     fed: "미국 기준금리", ust2: "미국채 2년", ust10: "미국채 10년", ust30: "미국채 30년",
     spread: "장단기 금리차 (10년−2년)", cpi: "미국 CPI (전년 대비)", unrate: "미국 실업률",
     gold: "금 (COMEX 선물)", jgb3: "일본 국채 3년", jgb10: "일본 국채 10년",
@@ -48,6 +50,7 @@
   const COUNT_UNITS = new Set(["건", "가구"]);
   const MAP_VIEWS = { nation: "전국", seoul: "서울", metro: "경기 · 인천" };
   const LIST_KINDS = [["deal", "매매"], ["lease", "전세"], ["rent", "월세"]];
+  const SECTOR_PERIODS = { "1D": "1일", "1W": "1주", "1M": "1개월", YTD: "연초 이후" };
   const WEEKS_SHOWN = 26;
   // 지도 색: 하락은 진한 파랑, 상승은 빨강 (연한 → 진한)
   const RED = ["#fde0dc", "#f6b2a8", "#ec8274", "#d94f41", "#ad2519"];
@@ -66,6 +69,7 @@
   let listGu = "서울";    // 매물: "서울" 이면 서울 전체
   let listOpen = false;   // 매물: 구별 목록 펼침 여부
   let supplyYear = null;  // 입주물량: 단지 목록을 펼친 연도
+  let sectorPeriod = "1D"; // 섹터: 등락 기간
 
   const store = {
     get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -637,6 +641,37 @@
     return card;
   }
 
+  // 미국 11개 섹터 ETF 등락: 오른 순서대로 막대, 점선은 S&P 500
+  function sectorCard(id, ind) {
+    const p = sectorPeriod, bench = ind.bench?.chg?.[p];
+    const rows = ind.rows.filter((r) => r.chg[p] != null).sort((a, b) => b.chg[p] - a.chg[p]);
+    const max = Math.max(0.1, ...rows.map((r) => Math.abs(r.chg[p])), Math.abs(bench ?? 0));
+    const pos = (v) => 50 + (v / max) * 50;
+    const ups = rows.filter((r) => dirOf(r.chg[p]) === "up").length;
+    const downs = rows.filter((r) => dirOf(r.chg[p]) === "down").length;
+    const card = cardShell(id, ind, "span-2");
+    card.insertAdjacentHTML("beforeend", `
+      <div class="lst-top">
+        <div class="seg" role="group" aria-label="기간 선택">${Object.entries(SECTOR_PERIODS).map(([k, v]) => `
+          <button type="button" data-speriod="${k}" aria-pressed="${p === k}">${v}</button>`).join("")}</div>
+      </div>
+      <div class="flow-cum sec-sum">
+        <span>오른 업종 <b class="up-t">${ups}</b></span><span>내린 업종 <b class="down-t">${downs}</b></span>
+        ${bench != null ? `<span><i class="bm-key"></i>S&amp;P 500 <b class="${dirOf(bench)}-t">${pctText(bench)}</b></span>` : ""}
+      </div>
+      <div class="sec-rows">${rows.map((r) => {
+        const v = r.chg[p], d = dirOf(v);
+        const col = d === "up" ? "var(--up)" : d === "down" ? "var(--down)" : "var(--flat)";
+        const bar = v >= 0 ? `left:50%;width:${pos(v) - 50}%` : `left:${pos(v)}%;width:${50 - pos(v)}%`;
+        return `<div class="sec-row"><span class="nm">${esc(r.name)}<small>${esc(r.sym)}</small></span>
+          <span class="dbar"><i style="${bar};background:${col}"></i>${bench != null ? `<b class="bm" style="left:${pos(bench)}%"></b>` : ""}</span>
+          <span class="num ${d}-t">${pctText(v)}</span></div>`;
+      }).join("")}</div>
+      <div class="note">미국 장 마감(한국시간 새벽 5~6시) 종가 기준이에요. 점선은 S&amp;P 500(SPY) 등락이라, 점선보다 오른쪽이면 시장보다 강했던 업종이에요.</div>
+      <div class="card-foot"><span>${SECTOR_PERIODS[p]} 등락률</span><span>${esc(ind.source)}</span></div>`);
+    return card;
+  }
+
   // ---------- 렌더 ----------
   function render() {
     charts.length = 0;
@@ -661,6 +696,7 @@
           : ind.type === "flow" ? flowCard(id, ind)
           : ind.type === "supply" ? supplyCard(id, ind)
           : ind.type === "listing" ? listingCard(id, ind)
+          : ind.type === "sectors" ? sectorCard(id, ind)
           : seriesCard(id, ind));
       }
       sec.append(grid);
@@ -705,6 +741,8 @@
     if (v && v.dataset.view !== mapView) { mapView = v.dataset.view; render(); }
     const lk = e.target.closest(".seg button[data-lkind]");
     if (lk && +lk.dataset.lkind !== listKind) { listKind = +lk.dataset.lkind; render(); }
+    const sp = e.target.closest(".seg button[data-speriod]");
+    if (sp && sp.dataset.speriod !== sectorPeriod) { sectorPeriod = sp.dataset.speriod; render(); }
     const g = e.target.closest("li[data-gu]");
     if (g) { listGu = g.dataset.gu === listGu ? "서울" : g.dataset.gu; render(); }
   });
