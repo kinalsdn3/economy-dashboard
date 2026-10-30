@@ -17,8 +17,8 @@
     ],
     re: [
       { title: "전국 아파트 · 주간 변동률", ids: ["re_sale", "re_jeonse"] },
-      { title: "수도권 주간 변동률", ids: ["re_map"] },
-      { title: "서울 토지거래허가", ids: ["re_permit_seoul"] },
+      { title: "지역별 주간 변동률", ids: ["re_map"] },
+      { title: "서울 아파트 매물", ids: ["re_listing_seoul"] },
       { title: "서울 아파트 입주물량", ids: ["re_supply_seoul"] },
       { title: "거래 · 대출", ids: ["re_trade_seoul", "mortgage"] },
     ],
@@ -33,7 +33,7 @@
     gold: "금 (COMEX 선물)", jgb3: "일본 국채 3년", jgb10: "일본 국채 10년",
     bund3: "독일 국채 3년", bund10: "독일 국채 10년",
     re_sale: "전국 아파트 매매가격지수", re_jeonse: "전국 아파트 전세가격지수",
-    re_permit_seoul: "서울 토지거래허가 (허가 필지)", re_supply_seoul: "서울 아파트 입주물량",
+    re_listing_seoul: "서울 아파트 매물 수", re_supply_seoul: "서울 아파트 입주물량",
     re_trade_seoul: "서울 아파트 매매거래량", mortgage: "주담대 금리 (신규취급)",
   };
   const NOTES = {
@@ -41,12 +41,13 @@
     spread: "0 아래면 장단기 금리 역전이에요.",
     gold: "1트로이온스(31.1g)당 달러 가격이에요.",
     re_trade_seoul: "최근 1~2개월은 신고 기한(30일)이 남아 적게 잡힐 수 있어요.",
-    re_permit_seoul: "토지 필지 기준이라 아파트 거래 건수와 같지 않고, 아파트 외 토지도 포함돼요. 한 달가량 늦게 집계돼요.",
   };
   const PERIOD = { D: "전일 대비", W: "전주 대비", M: "전월 대비" };
-  const WIDE = new Set(["kr_flow", "re_sale", "re_jeonse", "re_trade_seoul", "re_permit_seoul"]);
-  const BAR_IDS = new Set(["re_trade_seoul", "re_permit_seoul"]);
-  const COUNT_UNITS = new Set(["건", "필지", "가구"]);
+  const WIDE = new Set(["kr_flow", "re_sale", "re_jeonse", "re_trade_seoul", "re_listing_seoul"]);
+  const BAR_IDS = new Set(["re_trade_seoul"]);
+  const COUNT_UNITS = new Set(["건", "가구"]);
+  const MAP_VIEWS = { nation: "전국", seoul: "서울", metro: "경기 · 인천" };
+  const LIST_KINDS = [["deal", "매매"], ["lease", "전세"], ["rent", "월세"]];
   const WEEKS_SHOWN = 26;
   // 지도 색: 하락은 진한 파랑, 상승은 빨강 (연한 → 진한)
   const RED = ["#fde0dc", "#f6b2a8", "#ec8274", "#d94f41", "#ad2519"];
@@ -60,7 +61,11 @@
   let geoLoading = null;
   let tab = "kr";
   let rankKind = "sale";
-  let mapView = "seoul";
+  let mapView = "nation";
+  let listKind = 0;       // 매물: 0 매매, 1 전세, 2 월세
+  let listGu = "서울";    // 매물: "서울" 이면 서울 전체
+  let listOpen = false;   // 매물: 구별 목록 펼침 여부
+  let supplyYear = null;  // 입주물량: 단지 목록을 펼친 연도
 
   const store = {
     get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -271,8 +276,8 @@
       <div class="delta">${deltaHtml}</div>
       ${sub ? `<div class="sub">${sub}</div>` : ""}
       <div class="chart${bars ? " tall" : ""}"></div>
+      ${ind.news && !ind.stale ? newsLine(ind.news) : ""}
       ${NOTES[id] ? `<div class="note">${NOTES[id]}</div>` : ""}
-      ${ind.byGu?.items?.length ? guList(ind) : ""}
       <div class="card-foot"><span>${ind.freq === "W" ? `주간 변동률 · ${spanLabel(s, "W")}` : spanLabel(s, ind.freq)}</span><span>${esc(ind.source)}</span></div>`);
 
     const box = $(".chart", card);
@@ -319,11 +324,13 @@
     return card;
   }
 
-  function guList(ind) {
-    const { month, items } = ind.byGu;
-    const max = Math.max(1, ...items.map((i) => i.value));
-    return `<details class="gu"><summary>구별 보기 · ${esc(longDate(month))}</summary><ol>${items.map((it) => `
-      <li><span class="nm">${esc(it.name)}</span><span class="gbar"><i style="width:${(it.value / max) * 100}%"></i></span><span class="pc">${fmt(it.value, 0)}</span></li>`).join("")}</ol></details>`;
+  // 크게 움직인 날의 대표 뉴스 한 줄 (누르면 원문)
+  function newsLine(n) {
+    const t = new Date(n.date);
+    const when = isNaN(t) ? "" : ` · ${t.getMonth() + 1}.${t.getDate()} ${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`;
+    const safe = /^https?:\/\//.test(n.link || "") ? n.link : "#";
+    return `<a class="news" href="${esc(safe)}" target="_blank" rel="noopener noreferrer">
+      <span class="news-t">${esc(n.title)}</span><span class="news-s">${esc(n.source)}${when}</span></a>`;
   }
 
   // ---------- 수도권 지도 + TOP10 ----------
@@ -351,9 +358,10 @@
   // 화면 폭에 맞춰 글자 크기를 정하고, 겹치거나 지역 밖으로 넘치는 라벨은 작은 지역부터 숨긴다.
   // 숨긴 지역 값은 탭/호버 툴팁과 TOP10 목록에서 볼 수 있다.
   function placeMapLabels(svg) {
-    const width = svg.getBoundingClientRect().width;
+    const { width, height } = svg.getBoundingClientRect();
     if (!width) return;
-    const k = width / +svg.viewBox.baseVal.width;
+    const vb = svg.viewBox.baseVal;
+    const k = height ? Math.min(width / vb.width, height / vb.height) : width / vb.width; // 높이 제한(전국 지도)도 반영
     const wide = width >= 480;
     const pctPx = wide ? 11.5 : 9, namePx = wide ? 10.5 : 8.5;
     const area = {};
@@ -373,8 +381,10 @@
     const kept = [], shownPct = new Set();
     const hit = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left) > 0.5
       && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 0.5;
+    const frame = svg.getBoundingClientRect();
     for (const it of items) {
-      const fits = it.rect.width <= it.box.width * k * 1.15;
+      const inside = it.rect.left >= frame.left && it.rect.right <= frame.right;
+      const fits = inside && it.rect.width <= it.box.width * k * 1.15;
       const ok = fits && !kept.some((o) => hit(o.rect, it.rect)) && (!it.name || shownPct.has(it.t.dataset.k));
       if (ok) { kept.push(it); if (!it.name) shownPct.add(it.t.dataset.k); } else it.t.remove();
     }
@@ -411,15 +421,20 @@
     }
     const geo = GEO[mapView];
     const list = ind.lists[mapView];
+    if (!geo || !list) {
+      card.innerHTML = `<div class="empty">다음 업데이트부터 볼 수 있어요</div>`;
+      return card;
+    }
     const value = (r) => ind.map[r.key];
     const scale = colorScale(geo.regions.map(value).filter((v) => v != null));
-    const totals = (mapView === "seoul" ? ["서울"] : ["경기", "인천"]).map((n) => {
+    const named = mapView !== "metro"; // 전국·서울은 지역 이름도 지도에 적는다
+    const totals = ({ nation: ["전국"], seoul: ["서울"], metro: ["경기", "인천"] }[mapView]).map((n) => {
       const v = ind.totals[n];
       if (v == null) return "";
       const d = dirOf(v, 2);
       return `<span>${n} <b class="${d}-t">${ARROW[d]} ${pctText(v)}</b></span>`;
     }).join("");
-    const label = (r) => (mapView === "seoul" ? r.name.replace(/구$/, "") : gyeonggiName(r.name));
+    const label = (r) => (mapView === "seoul" ? r.name.replace(/구$/, "") : mapView === "nation" ? r.name : gyeonggiName(r.name));
     const paths = geo.regions.map((r) => {
       const v = value(r);
       return `<path d="${r.d}" data-k="${esc(r.key)}" style="fill:${scale.color(v) || "var(--map-none)"}"/>`;
@@ -429,23 +444,22 @@
       if (v == null) return "";
       const attrs = `x="${r.lx}" data-k="${esc(r.key)}" data-y="${r.ly}" style="fill:${scale.ink(v)}"`;
       return `<text ${attrs} class="mp">${pctText(v)}</text>`
-        + (mapView === "seoul" ? `<text ${attrs} class="mn">${esc(label(r))}</text>` : "");
+        + (named ? `<text ${attrs} class="mn">${esc(label(r))}</text>` : "");
     }).join("");
     const legend = [...BLUE].reverse().concat(["var(--map-flat)"], RED)
       .map((c) => `<i style="background:${c}"></i>`).join("");
 
     card.innerHTML = `
       <div class="map-top">
-        <div class="seg" role="group" aria-label="지역 선택">
-          <button type="button" data-view="seoul" aria-pressed="${mapView === "seoul"}">서울</button>
-          <button type="button" data-view="metro" aria-pressed="${mapView === "metro"}">경기 · 인천</button>
+        <div class="seg" role="group" aria-label="지역 선택">${Object.entries(MAP_VIEWS).map(([k, v]) => `
+          <button type="button" data-view="${k}" aria-pressed="${mapView === k}">${v}</button>`).join("")}
         </div>
         <div class="map-tot">${totals}</div>
       </div>
       <div class="sub">${esc(shortDate(ind.asof, "W"))} · 전주 대비 ${rankKind === "sale" ? "매매" : "전세"}가격 변동률${ind.stale ? '<span class="stale">지연</span>' : ""}</div>
       <div class="map-body">
         <div class="map-wrap">
-          <svg class="map ${mapView}" viewBox="${geo.viewBox}" role="img" aria-label="${mapView === "seoul" ? "서울" : "경기·인천"} 시군구별 변동률 지도">
+          <svg class="map ${mapView}" viewBox="${geo.viewBox}" role="img" aria-label="${MAP_VIEWS[mapView]} ${mapView === "nation" ? "시도" : "시군구"}별 변동률 지도">
             ${geo.context ? `<path d="${geo.context}" class="ctx"/>` : ""}
             <g class="regions">${paths}</g>
             ${geo.context ? `<text class="ctx-label">서울</text>` : ""}
@@ -458,7 +472,7 @@
           <div><h4>하락 TOP10</h4>${topList(list.down, "down", 10)}</div>
         </div>
       </div>
-      <div class="card-foot"><span>${mapView === "seoul" ? "서울 25개 구" : "경기·인천 시군구(구)"} · ${list.count}개 지역 집계</span><span>${esc(ind.source)} · 경계 통계청</span></div>`;
+      <div class="card-foot"><span>${{ nation: "지도 17개 시도 · 순위 전국 시군구", seoul: "서울 25개 구", metro: "경기·인천 시군구(구)" }[mapView]} · ${list.count}개 지역 집계</span><span>${esc(ind.source)} · 경계 통계청</span></div>`;
 
     const svg = $("svg", card);
     const names = Object.fromEntries(geo.regions.map((r) => [r.key, r]));
@@ -470,7 +484,7 @@
       if (!p) return off();
       if (on !== p) { on?.classList.remove("on"); p.classList.add("on"); on = p; }
       const r = names[p.dataset.k], v = ind.map[r.key];
-      const nm = r.sido === "인천" ? `인천 ${r.name}` : r.sido === "경기" ? gyeonggiName(r.name) : r.name;
+      const nm = r.sido === "인천" ? `인천 ${r.name}` : r.sido === "경기" ? gyeonggiName(r.name) : r.name;  // 전국 지도는 sido 가 "전국"
       showTip(`<b>${esc(nm)}</b> ${v == null ? "데이터 없음" : pctText(v)}`, e.clientX, e.clientY - 6);
     };
     svg.addEventListener("pointermove", point);
@@ -495,9 +509,11 @@
       <div class="delta"><span class="lbl">${now.year}년 ${status(now)}</span>
         <span class="flat-t">→ ${last.year}년 ${fmt(last.value, 0)}가구 (${sign(chg)}${fmt(Math.abs(chg), 0)}%)</span></div>
       <div class="chart supply"></div>
-      <div class="supply-key"><span><i class="k-act"></i>실적</span><span><i class="k-plan"></i>예정·전망</span></div>
-      <div class="note">${esc(ind.source)}. 자동 수집이 아니라 직접 입력해 갱신하는 값이에요.</div>
-      <div class="card-foot"><span>${ys[0].year}–${last.year}년</span><span>부동산R114</span></div>`);
+      <div class="supply-key"><span><i class="k-act"></i>실적</span><span><i class="k-plan"></i>예정·전망</span>
+        <span class="hint">${thisYear}년 이후 막대를 누르면 입주 단지 목록</span></div>
+      ${supplyYear ? complexList(ind, supplyYear) : ""}
+      <div class="note">${esc(ind.source)}. 막대 값은 자동 수집이 아니라 직접 입력해 갱신하는 값이에요.</div>
+      <div class="card-foot"><span>${ys[0].year}–${last.year}년</span><span>부동산R114${ind.complexes?.some((c) => c.auto) ? " · 단지 청약홈" : ""}</span></div>`);
     const box = $(".chart", card);
     charts.push(() => {
       const w = box.clientWidth, h = box.clientHeight;
@@ -510,7 +526,7 @@
       const bars = ys.map((d, i) => {
         const x = i * (bw + gap), act = d.year <= ind.actualUntil;
         const r = el("rect", { x, y: y(d.value), width: bw, height: h - bottom - y(d.value), rx: 3,
-          class: act ? "s-act" : "s-plan" });
+          class: `${act ? "s-act" : "s-plan"}${d.year === supplyYear ? " sel" : ""}` });
         const t = el("text", { x: x + bw / 2, y: y(d.value) - 5, class: "s-val" });
         t.textContent = short(d.value);
         const yl = el("text", { x: x + bw / 2, y: h - 4, class: "s-yr" });
@@ -521,13 +537,103 @@
       svg.append(el("line", { x1: 0, x2: w, y1: h - bottom, y2: h - bottom, style: "stroke:var(--axis)" }));
       box.replaceChildren(svg);
       let on = -1;
-      bindHover(box, n, (i) => i * (bw + gap) + bw / 2, (i, cx, boxTop) => {
+      const cx = (i) => i * (bw + gap) + bw / 2;
+      bindHover(box, n, cx, (i, clientX, boxTop) => {
         if (on >= 0) bars[on].classList.remove("on");
         bars[i].classList.add("on"); on = i;
         const d = ys[i];
-        showTip(`<b>${d.year}년 ${fmt(d.value, 0)}가구</b> · ${status(d)}<br>${esc(d.source)}`, cx, boxTop + y(d.value));
+        showTip(`<b>${d.year}년 ${fmt(d.value, 0)}가구</b> · ${status(d)}<br>${esc(d.source)}`, clientX, boxTop + y(d.value));
       }, () => { if (on >= 0) bars[on].classList.remove("on"); on = -1; });
+      // 올해 이후 막대를 누르면 그해 입주 단지 목록을 펼치고, 다시 누르면 닫는다
+      box.addEventListener("click", (e) => {
+        const x = e.clientX - box.getBoundingClientRect().left;
+        const i = ys.reduce((best, _, j) => (Math.abs(cx(j) - x) < Math.abs(cx(best) - x) ? j : best), 0);
+        const yr = ys[i].year;
+        if (yr < thisYear) return;
+        supplyYear = supplyYear === yr ? null : yr;
+        render();
+      });
     });
+    return card;
+  }
+
+  function complexList(ind, year) {
+    const list = (ind.complexes || []).filter((c) => +c.ym.slice(0, 4) === year);
+    const total = list.reduce((a, c) => a + (c.units || 0), 0);
+    const head = `<div class="cx-head"><b>${year}년 입주 예정 단지</b><span>${list.length}개${list.length ? ` · ${fmt(total, 0)}세대` : ""}</span></div>`;
+    if (!list.length) {
+      return `<div class="cx">${head}<div class="rank-none">${ind.complexesAuto
+        ? "등록된 단지가 없어요. 아직 분양 전인 단지가 많아요."
+        : "단지 목록은 청약홈 키를 등록하면 자동으로 채워져요."}</div></div>`;
+    }
+    return `<div class="cx">${head}<ol>${list.map((c) => `
+      <li><span class="gu">${esc(c.gu)}</span><span class="nm">${esc(c.name)}</span>
+        <span class="un">${fmt(c.units, 0)}세대</span><span class="ym">${esc(longDate(c.ym))}</span></li>`).join("")}</ol>
+      <div class="note">세대수는 청약홈 모집공고의 공급(분양) 세대 기준이라 조합원·임대분이 빠져 막대 값보다 작아요.</div></div>`;
+  }
+
+  // ---------- 서울 아파트 매물 수 (네이버 부동산, 날짜별로 쌓음) ----------
+  function listingCard(id, ind) {
+    const card = cardShell(id, ind, "span-2");
+    const H = ind.history;
+    const gus = Object.keys(H).filter((g) => g !== "서울").sort((a, b) => a.localeCompare(b, "ko"));
+    if (!H[listGu]) listGu = "서울";
+    const k = listKind + 1; // 행: [날짜, 매매, 전세, 월세]
+    const rows = H[listGu];
+    const last = rows[rows.length - 1];
+    // 비교 기준: 30일 전과 가장 가까운 기록 (기록이 짧으면 가장 오래된 기록)
+    const baseOf = (rs) => {
+      const target = new Date(rs[rs.length - 1][0]); target.setDate(target.getDate() - 30);
+      const t = target.toISOString().slice(0, 10);
+      return [...rs].reverse().find((r) => r[0] <= t) || rs[0];
+    };
+    const base = baseOf(rows);
+    const days = Math.round((new Date(last[0]) - new Date(base[0])) / 864e5);
+    const diff = last[k] - base[k];
+    const d = dirOf(diff, 0);
+    const pct = base[k] ? (diff / base[k]) * 100 : 0;
+    const deltaHtml = days
+      ? `<span class="lbl">${days}일 전 대비</span><span class="${d}-t">${ARROW[d]} ${fmt(Math.abs(diff), 0)}건 (${sign(+pct.toFixed(1))}${fmt(Math.abs(pct), 1)}%)</span>`
+      : `<span class="lbl">추이는 오늘부터 하루씩 쌓여요</span>`;
+
+    // 구별 증감 목록
+    const items = gus.map((g) => {
+      const rs = H[g], b = baseOf(rs), l = rs[rs.length - 1];
+      return { g, now: l[k], chg: b[k] ? (l[k] / b[k] - 1) * 100 : 0 };
+    }).sort((a, b) => (days ? b.chg - a.chg : b.now - a.now));
+    const maxAbs = Math.max(0.1, ...items.map((i) => Math.abs(i.chg)));
+
+    card.insertAdjacentHTML("beforeend", `
+      <div class="lst-top">
+        <div class="seg" role="group" aria-label="거래 종류">${LIST_KINDS.map(([, v], i) => `
+          <button type="button" data-lkind="${i}" aria-pressed="${listKind === i}">${v}</button>`).join("")}</div>
+        <select class="lst-gu" aria-label="지역 선택">
+          <option value="서울"${listGu === "서울" ? " selected" : ""}>서울 전체</option>
+          ${gus.map((g) => `<option${g === listGu ? " selected" : ""}>${esc(g)}</option>`).join("")}
+        </select>
+      </div>
+      <div class="value">${fmt(last[k], 0)}<small>건</small></div>
+      <div class="delta">${deltaHtml}</div>
+      <div class="sub">${esc(listGu === "서울" ? "서울 전체" : listGu)} ${LIST_KINDS[listKind][1]} 매물</div>
+      ${rows.length > 1 ? `<div class="chart"></div>` : ""}
+      <details class="lst"${listOpen ? " open" : ""}><summary>구별 ${days ? `${days}일 증감` : "매물 수"} · 눌러서 선택</summary>
+        <ol>${items.map((it) => {
+          const dd = dirOf(it.chg, 1);
+          return `<li data-gu="${esc(it.g)}"${it.g === listGu ? ' class="sel"' : ""}><span class="nm">${esc(it.g)}</span>
+            <span class="gbar">${days ? `<i style="width:${(Math.abs(it.chg) / maxAbs) * 100}%;background:var(--${dd === "flat" ? "flat" : dd})"></i>` : ""}</span>
+            <span class="pc">${fmt(it.now, 0)}</span>
+            ${days ? `<span class="pc ${dd}-t">${sign(+it.chg.toFixed(1))}${fmt(Math.abs(it.chg), 1)}%</span>` : ""}</li>`;
+        }).join("")}</ol></details>
+      <div class="note">네이버 부동산에 올라온 아파트 매물 수예요(같은 집을 여러 중개사가 올리면 중복돼요). 비공식 수집이라 가끔 빠질 수 있어요.</div>
+      <div class="card-foot"><span>${esc(longDate(rows[0][0]))}부터 기록</span><span>${esc(ind.source)}</span></div>`);
+
+    const box = $(".chart", card);
+    if (box) {
+      const s = rows.map((r) => [r[0], r[k]]);
+      charts.push(() => bindLineHover(box, lineChart(box, s, `${listGu} 매물`), s, (v) => `${fmt(v, 0)}건`));
+    }
+    $(".lst-gu", card).addEventListener("change", (e) => { listGu = e.target.value; render(); });
+    $("details.lst", card).addEventListener("toggle", (e) => { listOpen = e.target.open; });
     return card;
   }
 
@@ -554,6 +660,7 @@
           : !ind ? emptyCard(id)
           : ind.type === "flow" ? flowCard(id, ind)
           : ind.type === "supply" ? supplyCard(id, ind)
+          : ind.type === "listing" ? listingCard(id, ind)
           : seriesCard(id, ind));
       }
       sec.append(grid);
@@ -596,6 +703,10 @@
     if (b && b.dataset.kind !== rankKind) { rankKind = b.dataset.kind; render(); }
     const v = e.target.closest(".seg button[data-view]");
     if (v && v.dataset.view !== mapView) { mapView = v.dataset.view; render(); }
+    const lk = e.target.closest(".seg button[data-lkind]");
+    if (lk && +lk.dataset.lkind !== listKind) { listKind = +lk.dataset.lkind; render(); }
+    const g = e.target.closest("li[data-gu]");
+    if (g) { listGu = g.dataset.gu === listGu ? "서울" : g.dataset.gu; render(); }
   });
   addEventListener("hashchange", () => setTab(location.hash.slice(1), false));
   let resizeTimer, lastW = innerWidth;

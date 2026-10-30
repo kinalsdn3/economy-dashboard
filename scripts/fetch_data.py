@@ -8,17 +8,21 @@ GitHub Actions 에서 하루 한 번 실행되어 data/data.json 을 갱신한�
   ECOS_API_KEY  한국은행 ECOS
   FRED_API_KEY  미국 세인트루이스 연준 FRED
   REB_API_KEY   한국부동산원 R-ONE
+  DATA_GO_KR_KEY 공공데이터포털 (청약홈 분양정보, 없으면 입주 단지 목록은 수기 입력분만)
 """
 import csv
 import datetime as dt
+import email.utils
 import io
 import json
 import os
+import re
 import ssl
 import sys
 import time
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 try:  # 로컬 Windows 처럼 시스템 인증서가 부족한 환경 대비 (Actions 에서는 없어도 됨)
@@ -36,16 +40,30 @@ TODAY = dt.datetime.now(KST).date()
 ECOS_KEY = os.environ.get("ECOS_API_KEY", "").strip()
 FRED_KEY = os.environ.get("FRED_API_KEY", "").strip()
 REB_KEY = os.environ.get("REB_API_KEY", "").strip()
+DATA_KEY = os.environ.get("DATA_GO_KR_KEY", "").strip()
+SECRETS = [k for k in (ECOS_KEY, FRED_KEY, REB_KEY, DATA_KEY, urllib.parse.quote(DATA_KEY, safe="")) if k]
 
 # R-ONE 통계표 ID
 REB_WEEKLY_SALE = "T244183132827305"    # (주) 매매가격지수 - 주간아파트동향
 REB_WEEKLY_JEONSE = "T247713133046872"  # (주) 전세가격지수 - 주간아파트동향
 REB_MONTHLY_TRADE = "A_2024_00554"      # (월) 행정구역별 아파트매매거래현황
-REB_MONTHLY_PERMIT = "A_2024_00655"     # (월) 토지거래허가처리별 토지거래현황
 REB_NATIONWIDE = 50001                  # 주간 통계의 '전국' 분류 ID
 REB_SEOUL_TRADE = 500002                # 거래현황 통계의 '서울' 분류 ID
-REB_PERMITTED = 500002                  # 토지거래허가 통계의 '허가' 분류 ID
 METRO = ("서울", "경기", "인천")
+SIDO = ("서울", "부산", "대구", "인천", "광주", "대전", "울산", "세종", "경기",
+        "강원", "충북", "충남", "전북", "전남", "경북", "경남", "제주")
+
+# 크게 움직인 날 카드에 붙일 뉴스 헤드라인: id → (검색어, 기준 변동률 %)
+NEWS = {
+    "kospi": ("코스피", 1.5), "kosdaq": ("코스닥", 1.5), "usdkrw": ("원달러 환율", 1.0),
+    "samsung": ("삼성전자 주가", 3.0), "hynix": ("SK하이닉스 주가", 3.0),
+    "spx": ("뉴욕증시 S&P500", 1.5), "ndx": ("나스닥 지수", 1.5), "dji": ("다우지수", 1.5),
+    "vix": ("VIX 공포지수", 15.0), "gold": ("국제 금값", 2.0),
+}
+NAVER_LAND = "https://m.land.naver.com"
+SEOUL_CORTAR = "1100000000"
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/130.0 Safari/537.36")
 
 
 def get_bytes(url, params=None, headers=None, tries=3):
@@ -62,8 +80,8 @@ def get_bytes(url, params=None, headers=None, tries=3):
             time.sleep(3 * (i + 1))
 
 
-def get_json(url, params=None):
-    return json.loads(get_bytes(url, params).decode("utf-8"))
+def get_json(url, params=None, headers=None):
+    return json.loads(get_bytes(url, params, headers).decode("utf-8"))
 
 
 def days_ago(n):
@@ -251,7 +269,7 @@ def top_lists(items, n=10):
 
 
 def weekly_regions(statbl):
-    """수도권 시군구의 전주 대비 변동률: 지도용 전체 값 + 서울 / 경기·인천 TOP10."""
+    """전주 대비 변동률: 전국 시도 + 수도권 시군구 지도 값, 전국 / 서울 / 경기·인천 TOP10."""
     rows = reb(statbl, "WK", ITM_ID=10001,
                START_WRTTIME=week_id(days_ago(35)), END_WRTTIME=week_id(TODAY))
     weeks = sorted({r["WRTTIME_IDTFR_ID"] for r in rows})
@@ -268,21 +286,37 @@ def weekly_regions(statbl):
         a, b = val.get((cur, n)), val.get((prev, n))
         return None if a is None or not b else (a / b - 1) * 100
 
-    items, totals = {top: [] for top in METRO}, {}
-    for top in METRO:
-        total = change(top)
-        totals[top] = None if total is None else round(total, 3)
+    def sido_change(top):
+        c = change(top)
+        if c is None and top in ("광주", "전남"):  # 2026년 통합 이후 이름이 바뀌었을 경우 대비
+            merged = next((n for n in names if ">" not in n and "광주" in n and "전남" in n), None)
+            c = merged and change(merged)
+        return None if c is None else round(c, 3)
+
+    items, totals, sido_map = {top: [] for top in SIDO}, {}, {}
+    nation = change("전국")
+    totals["전국"] = None if nation is None else round(nation, 3)
+    for top in SIDO:
+        totals[top] = sido_map[f"전국|{top}"] = sido_change(top)
         for n in names:
             if n.startswith(top + ">") and not any(m.startswith(n + ">") for m in names):
                 c = change(n)
                 if c is not None:
                     label = region_label(n)
                     items[top].append({"key": region_key(n), "change": round(c, 3),
-                                       "name": f"인천 {label}" if top == "인천" else label})
+                                       "name": label if top == "서울" or (top == "경기" and top not in label)
+                                       else f"{top} {label}"})
+    # 전국 순위에서는 모든 지역 앞에 시도 이름을 붙인다 (서울 중구 / 인천 중구 구분)
+    everything = [{**i, "name": i["name"] if i["name"].startswith(top + " ") else f"{top} {i['name']}"}
+                  for top in SIDO for i in items[top]]
+    # 하위 지역이 없는 시도(세종)는 시도 자체를 전국 순위에 넣는다
+    everything += [{"key": f"전국|{t}", "change": sido_map[f"전국|{t}"], "name": t}
+                   for t in SIDO if not items[t] and sido_map[f"전국|{t}"] is not None]
     return {
         "asof": desc[cur], "prev": desc[prev], "totals": totals,
-        "map": {i["key"]: i["change"] for top in METRO for i in items[top]},
+        "map": {**sido_map, **{i["key"]: i["change"] for top in METRO for i in items[top]}},
         "lists": {
+            "nation": top_lists(everything),
             "seoul": top_lists(items["서울"]),
             "metro": top_lists(items["경기"] + items["인천"]),
         },
@@ -296,31 +330,115 @@ def seoul_trades():
     return [[f"{k[:4]}-{k[4:]}", by_month[k]] for k in sorted(by_month)]
 
 
-def seoul_permits():
-    """서울 토지거래허가 '허가' 필지수: 월별 추이 + 최근 월 구별."""
-    rows = reb(REB_MONTHLY_PERMIT, "MM", CLS_ID=REB_PERMITTED,
-               START_WRTTIME=days_ago(800).strftime("%Y%m"), END_WRTTIME=TODAY.strftime("%Y%m"))
-    rows = [r for r in rows if "필지" in (r.get("ITM_NM") or "")]
-    total = {r["WRTTIME_IDTFR_ID"]: r["DTA_VAL"] for r in rows if r.get("GRP_FULLNM") == "서울"}
-    if not total:
-        raise RuntimeError("서울 토지거래허가 데이터 없음")
-    months = sorted(total)
-    last = months[-1]
-    by_gu = sorted(({"name": r["GRP_FULLNM"].split(">")[-1], "value": r["DTA_VAL"]}
-                    for r in rows if r["WRTTIME_IDTFR_ID"] == last
-                    and (r.get("GRP_FULLNM") or "").startswith("서울>")),
-                   key=lambda i: -i["value"])
-    return {
-        "series": [[f"{k[:4]}-{k[4:]}", total[k]] for k in months],
-        "byGu": {"month": f"{last[:4]}-{last[4:]}", "items": by_gu},
-    }
+def seoul_listings(old):
+    """네이버 부동산 서울 아파트 매물 수(매매·전세·월세)를 구별로 합산해 날짜별로 쌓는다.
+
+    네이버는 현재 매물 수만 보여 주므로 추이는 매일 실행하며 직접 쌓는다 (최근 400일 보관).
+    비공식 경로라 막히거나 구조가 바뀌면 실패할 수 있다.
+    """
+    headers = {"User-Agent": BROWSER_UA, "Referer": f"{NAVER_LAND}/"}
+    streak = 0  # 연속 실패 수: 차단(/error/abuse)되면 오래 매달리지 않고 바로 포기한다
+
+    def call(path, cortar):
+        nonlocal streak
+        time.sleep(1.0)  # 빠르게 연속 호출하면 차단되므로 천천히
+        try:
+            d = get_json(f"{NAVER_LAND}{path}", {"cortarNo": cortar}, headers)
+            streak = 0
+            return d["result"]
+        except Exception:
+            streak += 1
+            if streak >= 5:
+                raise RuntimeError("네이버 부동산 접속이 막혔어요 (연속 5회 실패)") from None
+            return None
+
+    today, counts, failed, total_dongs = TODAY.isoformat(), {}, 0, 0
+    for gu in (call("/map/getRegionList", SEOUL_CORTAR) or {}).get("list", []):
+        dongs = call("/map/getRegionList", gu["CortarNo"])
+        if not dongs:
+            continue  # 이 구는 빠지고, 아래에서 25개 구가 안 되면 실패 처리
+        deal = lease = rent = 0
+        for dong in dongs.get("list", []):
+            total_dongs += 1
+            rows = call("/complex/ajax/complexListByCortarNo", dong["CortarNo"])
+            if rows is None:
+                failed += 1
+                continue
+            for r in rows:
+                if r.get("hscpTypeCd") == "A01":  # 아파트만 (오피스텔·분양권 제외)
+                    deal += r.get("dealCnt") or 0
+                    lease += r.get("leaseCnt") or 0
+                    rent += r.get("rentCnt") or 0
+        counts[gu["CortarNm"]] = [deal, lease, rent]
+    if len(counts) < 25 or failed > total_dongs * 0.05:
+        raise RuntimeError(f"네이버 매물 수집 불완전 (구 {len(counts)}개, 동 실패 {failed}/{total_dongs})")
+    counts["서울"] = [sum(v[i] for v in counts.values()) for i in range(3)]
+
+    history = (old or {}).get("history") or {}
+    cutoff = days_ago(400).isoformat()
+    for name, v in counts.items():
+        rows = [r for r in history.get(name, []) if r[0] != today and r[0] >= cutoff]
+        history[name] = rows + [[today, *v]]
+    return {"type": "listing", "name": "서울 아파트 매물 수", "unit": "건", "freq": "D",
+            "source": "네이버 부동산", "asof": today, "history": history}
 
 
-def seoul_supply():
+def news_headline(query, up):
+    """구글 뉴스 RSS 에서 최근 이틀 안의 대표 헤드라인 하나 (제목·언론사·링크만 사용)."""
+    for q in (f"{query} {'상승' if up else '하락'}", query):
+        xml = get_bytes("https://news.google.com/rss/search",
+                        {"q": f"{q} when:2d", "hl": "ko", "gl": "KR", "ceid": "KR:ko"})
+        for item in ET.fromstring(xml).iter("item"):
+            title, source = item.findtext("title") or "", item.findtext("source") or ""
+            if source and title.endswith(f" - {source}"):
+                title = title[: -len(source) - 3]
+            pub = email.utils.parsedate_to_datetime(item.findtext("pubDate"))
+            return {"title": title.strip(), "source": source, "link": item.findtext("link"),
+                    "date": pub.astimezone(KST).isoformat(timespec="minutes")}
+    return None
+
+
+def applyhome_seoul():
+    """청약홈 분양정보에서 서울 아파트의 입주예정월·공급 세대수 (2021년 이후 모집공고)."""
+    if not DATA_KEY:
+        return []
+    out, page = {}, 1
+    while page <= 20:
+        d = get_json("https://api.odcloud.kr/api/ApplyhomeInfoDetailSvc/v1/getAPTLttotPblancDetail", {
+            "serviceKey": DATA_KEY, "page": page, "perPage": 500,
+            "cond[SUBSCRPT_AREA_CODE_NM::EQ]": "서울",
+            "cond[RCRIT_PBLANC_DE::GTE]": "2021-01-01",
+        })
+        rows = d.get("data") or []
+        for r in rows:
+            ym = str(r.get("MVN_PREARNGE_YM") or "")
+            addr = (r.get("HSSPLY_ADRES") or "").split()
+            if len(ym) < 6 or len(addr) < 2:
+                continue
+            out[r.get("HOUSE_MANAGE_NO") or r["HOUSE_NM"]] = {
+                "gu": addr[1], "name": (r.get("HOUSE_NM") or "").strip(),
+                "units": int(r.get("TOT_SUPLY_HSHLDCO") or 0), "ym": f"{ym[:4]}-{ym[4:6]}", "auto": True}
+        if not rows or page * 500 >= (d.get("matchCount") or d.get("totalCount") or 0):
+            break
+        page += 1
+    return list(out.values())
+
+
+def seoul_supply(errors):
     d = json.loads(SUPPLY_FILE.read_text(encoding="utf-8"))
+    try:
+        auto = applyhome_seoul()
+    except Exception as e:  # noqa: BLE001 - 단지 목록이 실패해도 막대그래프는 보여 준다
+        errors.append(f"re_supply_seoul 청약홈: {e}")
+        auto = []
+    manual = [{**c, "auto": False} for c in d.get("complexes", [])]
+    names = {c["name"] for c in manual}
+    first_year = TODAY.year
+    complexes = sorted((c for c in [*manual, *(a for a in auto if a["name"] not in names)]
+                        if int(c["ym"][:4]) >= first_year), key=lambda c: (c["ym"], c["gu"], c["name"]))
     return {"type": "supply", "name": d["name"], "unit": d["unit"], "freq": "Y",
             "source": d["basis"], "asof": d["updated"], "actualUntil": d["actual_until"],
-            "years": d["years"]}
+            "years": d["years"], "complexes": complexes, "complexesAuto": bool(DATA_KEY)}
 
 
 # ---------- 지표 정의 ----------
@@ -421,9 +539,8 @@ def main():
 
     def keep_old(key, err):
         err = str(err)
-        for secret in (ECOS_KEY, FRED_KEY, REB_KEY):
-            if secret:
-                err = err.replace(secret, "***")  # 공개 data.json 에 키가 새지 않도록
+        for secret in SECRETS:
+            err = err.replace(secret, "***")  # 공개 data.json 에 키가 새지 않도록
         errors.append(f"{key}: {err}")
         print(f"  ✗ {key}: {err}", file=sys.stderr)
         if key in old:
@@ -446,6 +563,22 @@ def main():
         except Exception as e:  # noqa: BLE001
             errors.append(f"fed lower: {e}")
 
+    # 크게 움직인 지표에 뉴스 헤드라인 한 줄
+    for key, (query, threshold) in NEWS.items():
+        s = ind.get(key, {}).get("series")
+        if not s or len(s) < 2 or ind[key].get("stale"):
+            continue
+        pct = (s[-1][1] / s[-2][1] - 1) * 100
+        if abs(pct) < threshold:
+            continue
+        try:
+            item = news_headline(query, pct > 0)
+            if item:
+                ind[key]["news"] = item
+                print(f"  📰 {key} {pct:+.1f}%: {item['title']}")
+        except Exception as e:  # noqa: BLE001 - 뉴스는 없어도 된다
+            errors.append(f"{key} 뉴스: {e}")
+
     try:
         try:
             rows, source = naver_flows(), "네이버 증권"
@@ -467,17 +600,14 @@ def main():
             keep_old(key, e)
 
     try:
-        p = seoul_permits()
-        ind["re_permit_seoul"] = {"name": "서울 토지거래허가 (허가 필지)", "unit": "필지", "freq": "M",
-                                  "change": "pct", "decimals": 0, "source": "한국부동산원 R-ONE",
-                                  "asof": p["series"][-1][0], **p}
-        print(f"  ✓ re_permit_seoul ({p['series'][-1][0]})")
+        ind["re_listing_seoul"] = seoul_listings(old.get("re_listing_seoul"))
+        print(f"  ✓ re_listing_seoul (서울 매물 {ind['re_listing_seoul']['history']['서울'][-1][1:]})")
     except Exception as e:  # noqa: BLE001
-        keep_old("re_permit_seoul", e)
+        keep_old("re_listing_seoul", e)
 
     try:
-        ind["re_supply_seoul"] = seoul_supply()
-        print("  ✓ re_supply_seoul (수기 입력)")
+        ind["re_supply_seoul"] = seoul_supply(errors)
+        print(f"  ✓ re_supply_seoul (수기 입력 + 단지 {len(ind['re_supply_seoul']['complexes'])}개)")
     except Exception as e:  # noqa: BLE001
         keep_old("re_supply_seoul", e)
 
@@ -486,6 +616,8 @@ def main():
         print("모든 지표 수집 실패 — data.json 을 바꾸지 않습니다.", file=sys.stderr)
         sys.exit(1)
 
+    for secret in SECRETS:  # keep_old 를 거치지 않은 오류 문구도 한 번 더 가린다
+        errors = [e.replace(secret, "***") for e in errors]
     data = {"updated": dt.datetime.now(KST).isoformat(timespec="minutes"),
             "indicators": ind, "errors": errors}
     OUT.parent.mkdir(parents=True, exist_ok=True)
