@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>경제지표 대시보드</title>
+  <meta name="description" content="한국주식 · 미국주식 · 부동산 주요 지표를 매일 자동으로 모아 보는 대시보드">
+  <meta name="theme-color" content="#f4f4f1" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)">
+  <meta property="og:title" content="경제지표 대시보드">
+  <meta property="og:description" content="한국주식 · 미국주식 · 부동산 주요 지표, 매일 자동 업데이트">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23d03b3b'/%3E%3Cpath d='M7 21l6-6 4 4 8-9' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="top-inner">
+      <div class="brand">
+        <h1>경제지표 대시보드</h1>
+        <p class="updated" id="updated">불러오는 중…</p>
+      </div>
+      <button class="theme-btn" id="themeBtn" type="button" aria-label="화면 모드 바꾸기">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg>
+      </button>
+    </div>
+    <nav class="tabs" role="tablist" aria-label="지표 분류">
+      <button role="tab" data-tab="kr" aria-selected="true">한국주식</button>
+      <button role="tab" data-tab="us" aria-selected="false">미국주식</button>
+      <button role="tab" data-tab="re" aria-selected="false">부동산</button>
+    </nav>
+  </header>
+
+  <main id="main" class="wrap" aria-live="polite"></main>
+
+  <footer class="foot wrap">
+    <p>출처: 한국은행 ECOS · 한국부동산원 R-ONE · FRED(세인트루이스 연준) · Yahoo Finance · 네이버 증권</p>
+    <p>매일 오후 6시 30분(한국시간)쯤 자동 업데이트돼요. 지표마다 발표 시점이 달라 기준일이 다를 수 있어요. 투자 판단의 근거가 아닌 참고용입니다.</p>
+  </footer>
+
+  <div class="tip" id="tip" role="status" hidden></div>
+  <script src="assets/app.js"></script>
+</body>
+</html>
