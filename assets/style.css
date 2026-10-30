@@ -229,3 +229,54 @@ main { padding-top: 14px; padding-bottom: 8px; }
 .errors { margin-top: 6px; }
 .errors summary { cursor: pointer; }
 .errors ul { margin: 6px 0 0; padding-left: 18px; }
+
+/* ---------- 지도 ---------- */
+:root { --map-flat: #e4e3dd; --map-none: #f3f2ef; --map-ctx: #ecebe6; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --map-flat: #4a4a46; --map-none: #262624; --map-ctx: #2a2a28; }
+}
+:root[data-theme="dark"] { --map-flat: #4a4a46; --map-none: #262624; --map-ctx: #2a2a28; }
+
+.map-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.map-tot { display: flex; gap: 12px; font-size: 13px; color: var(--ink-2); }
+.map-tot b { font-weight: 700; font-variant-numeric: tabular-nums; }
+.map-card > .sub { margin-top: 8px; }
+.map-body { display: grid; gap: 16px; margin-top: 10px; }
+@media (min-width: 900px) { .map-body { grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); align-items: start; gap: 24px; } }
+.map-wrap { min-width: 0; }
+svg.map { display: block; width: 100%; height: auto; touch-action: manipulation; }
+svg.map path[data-k] { stroke: var(--surface); stroke-width: 1.2; vector-effect: non-scaling-stroke; stroke-linejoin: round; cursor: pointer; }
+svg.map path[data-k].on { stroke: var(--ink); stroke-width: 2; }
+svg.map .regions path.on { paint-order: stroke; }
+svg.map .ctx { fill: var(--map-ctx); stroke: var(--axis); stroke-width: 1; vector-effect: non-scaling-stroke; stroke-dasharray: 3 3; }
+svg.map .ctx-label { font-weight: 700; fill: var(--muted); text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
+svg.map text { text-anchor: middle; pointer-events: none; font-variant-numeric: tabular-nums; }
+svg.map .mn { font-weight: 600; opacity: .85; }
+svg.map .mp { font-weight: 750; letter-spacing: -0.02em; }
+.legend { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 10px; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.legend .ramp { display: flex; gap: 2px; }
+.legend .ramp i { width: 16px; height: 10px; border-radius: 2px; }
+.map-card .rank-cols { margin-top: 0; }
+.map-card .rank-cols ol { gap: 6px; }
+
+/* ---------- 구별 목록 ---------- */
+details.gu { margin-top: 10px; border-top: 1px solid var(--grid); padding-top: 8px; font-size: 12.5px; }
+details.gu summary { cursor: pointer; color: var(--ink-2); font-weight: 600; }
+details.gu ol { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 5px; }
+@media (min-width: 720px) { details.gu ol { grid-template-columns: 1fr 1fr; column-gap: 24px; } }
+details.gu li { display: grid; grid-template-columns: 64px 1fr 44px; align-items: center; gap: 8px; }
+details.gu .gbar { height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; }
+details.gu .gbar i { display: block; height: 100%; background: var(--muted); border-radius: 3px; }
+details.gu .pc { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+
+/* ---------- 입주물량 ---------- */
+.chart.supply { height: 170px; }
+.chart.supply .s-act { fill: var(--ink-2); opacity: .7; }
+.chart.supply .s-plan { fill: var(--ink-2); opacity: .25; }
+.chart.supply rect.on { opacity: 1; }
+.chart.supply .s-val { font-size: 10.5px; fill: var(--ink-2); text-anchor: middle; font-weight: 600; }
+.chart.supply .s-yr { font-size: 10.5px; fill: var(--muted); text-anchor: middle; }
+.supply-key { display: flex; gap: 14px; margin-top: 8px; font-size: 11.5px; color: var(--muted); }
+.supply-key i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; background: var(--ink-2); margin-right: 5px; vertical-align: -1px; }
+.supply-key .k-act { opacity: .7; }
+.supply-key .k-plan { opacity: .25; }

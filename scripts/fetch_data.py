@@ -9,17 +9,27 @@ GitHub Actions 에서 하루 한 번 실행되어 data/data.json 을 갱신한�
   FRED_API_KEY  미국 세인트루이스 연준 FRED
   REB_API_KEY   한국부동산원 R-ONE
 """
+import csv
 import datetime as dt
+import io
 import json
 import os
+import ssl
 import sys
 import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
+try:  # 로컬 Windows 처럼 시스템 인증서가 부족한 환경 대비 (Actions 에서는 없어도 됨)
+    import certifi
+    SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+except ImportError:
+    SSL_CTX = None
+
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "data" / "data.json"
+SUPPLY_FILE = ROOT / "data" / "manual" / "seoul_supply.json"
 KST = dt.timezone(dt.timedelta(hours=9))
 TODAY = dt.datetime.now(KST).date()
 
@@ -31,23 +41,29 @@ REB_KEY = os.environ.get("REB_API_KEY", "").strip()
 REB_WEEKLY_SALE = "T244183132827305"    # (주) 매매가격지수 - 주간아파트동향
 REB_WEEKLY_JEONSE = "T247713133046872"  # (주) 전세가격지수 - 주간아파트동향
 REB_MONTHLY_TRADE = "A_2024_00554"      # (월) 행정구역별 아파트매매거래현황
+REB_MONTHLY_PERMIT = "A_2024_00655"     # (월) 토지거래허가처리별 토지거래현황
 REB_NATIONWIDE = 50001                  # 주간 통계의 '전국' 분류 ID
 REB_SEOUL_TRADE = 500002                # 거래현황 통계의 '서울' 분류 ID
+REB_PERMITTED = 500002                  # 토지거래허가 통계의 '허가' 분류 ID
 METRO = ("서울", "경기", "인천")
 
 
-def get_json(url, params=None, tries=3):
+def get_bytes(url, params=None, headers=None, tries=3):
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (econ-dashboard)"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (econ-dashboard)", **(headers or {})})
     for i in range(tries):
         try:
-            with urllib.request.urlopen(req, timeout=40) as r:
-                return json.loads(r.read().decode("utf-8"))
+            with urllib.request.urlopen(req, timeout=40, context=SSL_CTX) as r:
+                return r.read()
         except Exception:
             if i == tries - 1:
                 raise
             time.sleep(3 * (i + 1))
+
+
+def get_json(url, params=None):
+    return json.loads(get_bytes(url, params).decode("utf-8"))
 
 
 def days_ago(n):
@@ -116,6 +132,37 @@ def fred(series_id, start, units="lin", monthly=False):
             continue
         out.append([o["date"][:7] if monthly else o["date"], round(float(o["value"]), 4)])
     return out
+
+
+def jgb(term):
+    """일본 국채 금리 (일본 재무성 CSV). term 예: '3Y', '10Y'."""
+    base = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/"
+    points = {}
+    for path in ("historical/jgbcme_all.csv", "jgbcme.csv"):  # 과거 전체 + 이번 달
+        rows = list(csv.reader(io.StringIO(get_bytes(base + path).decode("shift_jis", "replace"))))
+        header = next(r for r in rows if r and r[0] == "Date")
+        col = header.index(term)
+        for r in rows:
+            if len(r) > col and r[0][:2] in ("19", "20") and "/" in r[0]:
+                try:
+                    day = dt.datetime.strptime(r[0], "%Y/%m/%d").date()
+                    value = float(r[col])
+                except ValueError:
+                    continue
+                if day >= Y1:
+                    points[day.isoformat()] = value
+    return [[k, v] for k, v in sorted(points.items())]
+
+
+def bund(years):
+    """독일 국채 금리 (분데스방크 수익률곡선, 잔존만기 years년)."""
+    key = f"D.I.ZST.ZI.EUR.S1311.B.A604.R{years:02d}XX.R.A.A._Z._Z.A"
+    text = get_bytes(f"https://api.statistiken.bundesbank.de/rest/data/BBSIS/{key}",
+                     {"startPeriod": Y1.isoformat()}, headers={"Accept": "text/csv"}).decode("utf-8")
+    rows = list(csv.reader(io.StringIO(text), delimiter=";"))
+    header = rows[0]
+    t, v = header.index("TIME_PERIOD"), header.index("OBS_VALUE")
+    return [[r[t], float(r[v])] for r in rows[1:] if len(r) > v and r[v] not in ("", ".")]
 
 
 def reb(statbl, cycle, **filters):
@@ -188,8 +235,23 @@ def region_label(fullnm):
     return leaf
 
 
+def region_key(fullnm):
+    # 지도(data/geo/metro.json) 키와 맞춘다: "경기>경부1권>수원시>장안구" → "경기|수원시장안구"
+    parts = fullnm.split(">")
+    leaf = parts[-1]
+    if len(parts) >= 3 and parts[-2].endswith("시") and leaf.endswith("구"):
+        leaf = parts[-2] + leaf
+    return f"{parts[0]}|{leaf}"
+
+
+def top_lists(items, n=10):
+    up = sorted((i for i in items if round(i["change"], 2) > 0), key=lambda i: -i["change"])[:n]
+    down = sorted((i for i in items if round(i["change"], 2) < 0), key=lambda i: i["change"])[:n]
+    return {"up": up, "down": down, "count": len(items)}
+
+
 def weekly_regions(statbl):
-    """서울/경기/인천 시군구의 전주 대비 변동률 상승·하락 TOP5."""
+    """수도권 시군구의 전주 대비 변동률: 지도용 전체 값 + 서울 / 경기·인천 TOP10."""
     rows = reb(statbl, "WK", ITM_ID=10001,
                START_WRTTIME=week_id(days_ago(35)), END_WRTTIME=week_id(TODAY))
     weeks = sorted({r["WRTTIME_IDTFR_ID"] for r in rows})
@@ -206,22 +268,25 @@ def weekly_regions(statbl):
         a, b = val.get((cur, n)), val.get((prev, n))
         return None if a is None or not b else (a / b - 1) * 100
 
-    groups = []
+    items, totals = {top: [] for top in METRO}, {}
     for top in METRO:
-        leaves = [n for n in names
-                  if n.startswith(top + ">") and not any(m.startswith(n + ">") for m in names)]
-        items = [(region_label(n), c) for n in leaves if (c := change(n)) is not None]
-        up = sorted((i for i in items if round(i[1], 2) > 0), key=lambda i: -i[1])[:5]
-        down = sorted((i for i in items if round(i[1], 2) < 0), key=lambda i: i[1])[:5]
         total = change(top)
-        groups.append({
-            "name": top,
-            "change": None if total is None else round(total, 3),
-            "count": len(items),
-            "up": [{"name": n, "change": round(c, 3)} for n, c in up],
-            "down": [{"name": n, "change": round(c, 3)} for n, c in down],
-        })
-    return {"asof": desc[cur], "prev": desc[prev], "groups": groups}
+        totals[top] = None if total is None else round(total, 3)
+        for n in names:
+            if n.startswith(top + ">") and not any(m.startswith(n + ">") for m in names):
+                c = change(n)
+                if c is not None:
+                    label = region_label(n)
+                    items[top].append({"key": region_key(n), "change": round(c, 3),
+                                       "name": f"인천 {label}" if top == "인천" else label})
+    return {
+        "asof": desc[cur], "prev": desc[prev], "totals": totals,
+        "map": {i["key"]: i["change"] for top in METRO for i in items[top]},
+        "lists": {
+            "seoul": top_lists(items["서울"]),
+            "metro": top_lists(items["경기"] + items["인천"]),
+        },
+    }
 
 
 def seoul_trades():
@@ -229,6 +294,33 @@ def seoul_trades():
                START_WRTTIME=days_ago(800).strftime("%Y%m"), END_WRTTIME=TODAY.strftime("%Y%m"))
     by_month = {r["WRTTIME_IDTFR_ID"]: r["DTA_VAL"] for r in rows}
     return [[f"{k[:4]}-{k[4:]}", by_month[k]] for k in sorted(by_month)]
+
+
+def seoul_permits():
+    """서울 토지거래허가 '허가' 필지수: 월별 추이 + 최근 월 구별."""
+    rows = reb(REB_MONTHLY_PERMIT, "MM", CLS_ID=REB_PERMITTED,
+               START_WRTTIME=days_ago(800).strftime("%Y%m"), END_WRTTIME=TODAY.strftime("%Y%m"))
+    rows = [r for r in rows if "필지" in (r.get("ITM_NM") or "")]
+    total = {r["WRTTIME_IDTFR_ID"]: r["DTA_VAL"] for r in rows if r.get("GRP_FULLNM") == "서울"}
+    if not total:
+        raise RuntimeError("서울 토지거래허가 데이터 없음")
+    months = sorted(total)
+    last = months[-1]
+    by_gu = sorted(({"name": r["GRP_FULLNM"].split(">")[-1], "value": r["DTA_VAL"]}
+                    for r in rows if r["WRTTIME_IDTFR_ID"] == last
+                    and (r.get("GRP_FULLNM") or "").startswith("서울>")),
+                   key=lambda i: -i["value"])
+    return {
+        "series": [[f"{k[:4]}-{k[4:]}", total[k]] for k in months],
+        "byGu": {"month": f"{last[:4]}-{last[4:]}", "items": by_gu},
+    }
+
+
+def seoul_supply():
+    d = json.loads(SUPPLY_FILE.read_text(encoding="utf-8"))
+    return {"type": "supply", "name": d["name"], "unit": d["unit"], "freq": "Y",
+            "source": d["basis"], "asof": d["updated"], "actualUntil": d["actual_until"],
+            "years": d["years"]}
 
 
 # ---------- 지표 정의 ----------
@@ -245,6 +337,10 @@ SERIES = [
     ("usdkrw", "원·달러 환율", "원", "D", "pct", 2, [
         ("Yahoo Finance", lambda: yahoo("KRW=X")),
         ("한국은행 ECOS", lambda: ecos("731Y001", "D", "0000001", Y1))]),
+    ("samsung", "삼성전자", "원", "D", "pct", 0, [
+        ("Yahoo Finance", lambda: yahoo("005930.KS"))]),
+    ("hynix", "SK하이닉스", "원", "D", "pct", 0, [
+        ("Yahoo Finance", lambda: yahoo("000660.KS"))]),
     ("kr_base", "한국 기준금리", "%", "D", "pp", 2, [
         ("한국은행 ECOS", lambda: ecos("722Y001", "D", "0101000", Y3))]),
     ("ktb3", "국고채 3년", "%", "D", "pp", 3, [
@@ -266,6 +362,16 @@ SERIES = [
         ("FRED", lambda: fred("VIXCLS", Y1))]),
     ("dxy", "달러인덱스", "", "D", "pct", 2, [
         ("Yahoo Finance", lambda: yahoo("DX-Y.NYB"))]),
+    ("gold", "금 (COMEX 선물)", "$/oz", "D", "pct", 2, [
+        ("Yahoo Finance", lambda: yahoo("GC=F"))]),
+    ("jgb3", "일본 국채 3년", "%", "D", "pp", 3, [
+        ("일본 재무성", lambda: jgb("3Y"))]),
+    ("jgb10", "일본 국채 10년", "%", "D", "pp", 3, [
+        ("일본 재무성", lambda: jgb("10Y"))]),
+    ("bund3", "독일 국채 3년", "%", "D", "pp", 2, [
+        ("독일 분데스방크", lambda: bund(3))]),
+    ("bund10", "독일 국채 10년", "%", "D", "pp", 2, [
+        ("독일 분데스방크", lambda: bund(10))]),
     ("fed", "미국 기준금리", "%", "D", "pp", 2, [
         ("FRED", lambda: fred("DFEDTARU", Y3))]),
     ("ust2", "미국채 2년", "%", "D", "pp", 2, [
@@ -360,7 +466,22 @@ def main():
         except Exception as e:  # noqa: BLE001
             keep_old(key, e)
 
-    fresh = [k for k, v in ind.items() if not v.get("stale")]
+    try:
+        p = seoul_permits()
+        ind["re_permit_seoul"] = {"name": "서울 토지거래허가 (허가 필지)", "unit": "필지", "freq": "M",
+                                  "change": "pct", "decimals": 0, "source": "한국부동산원 R-ONE",
+                                  "asof": p["series"][-1][0], **p}
+        print(f"  ✓ re_permit_seoul ({p['series'][-1][0]})")
+    except Exception as e:  # noqa: BLE001
+        keep_old("re_permit_seoul", e)
+
+    try:
+        ind["re_supply_seoul"] = seoul_supply()
+        print("  ✓ re_supply_seoul (수기 입력)")
+    except Exception as e:  # noqa: BLE001
+        keep_old("re_supply_seoul", e)
+
+    fresh =[k for k, v in ind.items() if not v.get("stale")]
     if not fresh:
         print("모든 지표 수집 실패 — data.json 을 바꾸지 않습니다.", file=sys.stderr)
         sys.exit(1)

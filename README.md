@@ -8,14 +8,24 @@ GitHub Pages로 호스팅되고, GitHub Actions가 매일 데이터를 갱신합
 | 탭 | 지표 | 출처 |
 |---|---|---|
 | 한국주식 | 코스피, 코스닥, 원·달러 환율 | Yahoo Finance (실패 시 한국은행 ECOS) |
+| | 삼성전자, SK하이닉스 | Yahoo Finance |
 | | 코스피 투자자별 순매수 (개인·외국인·기관, 최근 20일) | 네이버 증권 (실패 시 ECOS 외국인만) |
 | | 한국 기준금리, 국고채 3년·10년 | 한국은행 ECOS |
-| 미국주식 | S&P 500, 나스닥, 다우, VIX, 달러인덱스 | Yahoo Finance (실패 시 FRED) |
+| 미국주식 | S&P 500, 나스닥, 다우, VIX, 달러인덱스, 금(COMEX 선물) | Yahoo Finance (실패 시 FRED) |
 | | 미국 기준금리, 미국채 2년·10년·30년, 장단기 금리차 | FRED |
+| | 일본 국채 3년·10년 / 독일 국채 3년·10년 | 일본 재무성 / 독일 분데스방크 (키 불필요) |
 | | 미국 CPI(전년 대비), 실업률 | FRED |
 | 부동산 | 전국 아파트 매매·전세가격지수 주간 변동률 | 한국부동산원 R-ONE |
-| | 서울·경기·인천 주간 상승/하락 TOP5 (매매/전세 전환) | 한국부동산원 R-ONE |
+| | 수도권 시군구 주간 변동률 지도 + 서울 / 경기·인천 상승·하락 TOP10 (매매/전세 전환) | R-ONE, 경계: 통계청(vuski/admdongkor) |
+| | 서울 토지거래허가 허가 필지수 (월별 + 구별) | R-ONE |
+| | 서울 아파트 입주물량 2020–2030 | **수기 입력** (`data/manual/seoul_supply.json`, 부동산R114 보도 기준) |
 | | 서울 아파트 매매거래량, 주택담보대출 금리 | R-ONE, 한국은행 ECOS |
+
+### 직접 고치는 데이터
+- **서울 입주물량**: `data/manual/seoul_supply.json`의 `years` 값을 고쳐서 올리면 다음 실행 때 반영됩니다.
+  `actual_until` 이하 연도는 '실적', 그 뒤는 '예정'으로 표시돼요.
+- **지도 경계**: 행정구역이 바뀌면 [vuski/admdongkor](https://github.com/vuski/admdongkor)의 최신 행정동 GeoJSON을 받아
+  `pip install shapely` 후 `python scripts/build_map.py <파일>`로 `data/geo/metro.json`을 다시 만듭니다.
 
 ## 처음 설정 (한 번만)
 
