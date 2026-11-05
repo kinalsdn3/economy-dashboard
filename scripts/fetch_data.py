@@ -69,6 +69,9 @@ SECTORS = [
 ]
 # 아침 실행(미국 마감 반영용)에서는 네이버 매물 수집을 건너뛴다 (하루 두 번 접속하면 차단 위험)
 SKIP_LISTINGS = os.environ.get("SKIP_LISTINGS") == "1"
+# 목요일 14시 실행: 부동산원 주간 아파트 동향(목요일 14시 공표)만 새로 받고 나머지는 그대로 둔다
+WEEKLY_ONLY = os.environ.get("WEEKLY_ONLY") == "1"
+WEEKLY_KEYS = {"re_sale", "re_jeonse", "re_rank_sale", "re_rank_jeonse"}
 NAVER_LAND = "https://m.land.naver.com"
 SEOUL_CORTAR = "1100000000"
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -572,11 +575,16 @@ def first_ok(sources):
 
 def main():
     try:
-        old = json.loads(OUT.read_text(encoding="utf-8")).get("indicators", {})
+        prev = json.loads(OUT.read_text(encoding="utf-8"))
     except (FileNotFoundError, ValueError):
-        old = {}
+        prev = {}
+    old = prev.get("indicators", {})
 
-    ind, errors = {}, []
+    if WEEKLY_ONLY:  # 주간 지표 말고는 지난 실행 결과(지연 표시·오류 포함)를 그대로 쓴다
+        ind = {k: v for k, v in old.items() if k not in WEEKLY_KEYS}
+        errors = [e for e in prev.get("errors", []) if e.split(":")[0] not in WEEKLY_KEYS]
+    else:
+        ind, errors = {}, []
 
     def keep_old(key, err):
         err = str(err)
@@ -588,6 +596,8 @@ def main():
             ind[key] = {**old[key], "stale": True}
 
     for key, name, unit, freq, change, decimals, sources in SERIES:
+        if WEEKLY_ONLY and key not in WEEKLY_KEYS:
+            continue
         try:
             series, source = first_ok(sources)
             ind[key] = {"name": name, "unit": unit, "freq": freq, "change": change,
@@ -596,6 +606,23 @@ def main():
             print(f"  ✓ {key} ({source}, {series[-1][0]})")
         except Exception as e:  # noqa: BLE001
             keep_old(key, e)
+
+    for key, statbl, label in (("re_rank_sale", REB_WEEKLY_SALE, "매매"),
+                               ("re_rank_jeonse", REB_WEEKLY_JEONSE, "전세")):
+        try:
+            ind[key] = {"type": "rank", "name": f"{label}가격 주간 변동률", "freq": "W",
+                        "source": "한국부동산원 R-ONE", **weekly_regions(statbl)}
+            print(f"  ✓ {key} ({ind[key]['asof']})")
+        except Exception as e:  # noqa: BLE001
+            keep_old(key, e)
+
+    if WEEKLY_ONLY:
+        if not any(k in ind and not ind[k].get("stale") for k in WEEKLY_KEYS):
+            print("주간 지표 수집 실패 — data.json 을 바꾸지 않습니다.", file=sys.stderr)
+            sys.exit(1)
+        write(prev.get("updated"), ind, errors)  # 상단 업데이트 시각은 마지막 전체 실행 기준 유지
+        print("완료: 주간 아파트 동향만 갱신")
+        return
 
     # 미국 기준금리는 목표 범위 하단도 함께 표시
     if "fed" in ind and not ind["fed"].get("stale"):
@@ -637,15 +664,6 @@ def main():
     except Exception as e:  # noqa: BLE001
         keep_old("kr_flow", e)
 
-    for key, statbl, label in (("re_rank_sale", REB_WEEKLY_SALE, "매매"),
-                               ("re_rank_jeonse", REB_WEEKLY_JEONSE, "전세")):
-        try:
-            ind[key] = {"type": "rank", "name": f"{label}가격 주간 변동률", "freq": "W",
-                        "source": "한국부동산원 R-ONE", **weekly_regions(statbl)}
-            print(f"  ✓ {key} ({ind[key]['asof']})")
-        except Exception as e:  # noqa: BLE001
-            keep_old(key, e)
-
     if SKIP_LISTINGS:
         if "re_listing_seoul" in old:
             ind["re_listing_seoul"] = old["re_listing_seoul"]
@@ -668,13 +686,17 @@ def main():
         print("모든 지표 수집 실패 — data.json 을 바꾸지 않습니다.", file=sys.stderr)
         sys.exit(1)
 
+    write(None, ind, errors)
+    print(f"완료: {len(fresh)}개 갱신, {len(errors)}개 오류")
+
+
+def write(updated, ind, errors):
     for secret in SECRETS:  # keep_old 를 거치지 않은 오류 문구도 한 번 더 가린다
         errors = [e.replace(secret, "***") for e in errors]
-    data = {"updated": dt.datetime.now(KST).isoformat(timespec="minutes"),
+    data = {"updated": updated or dt.datetime.now(KST).isoformat(timespec="minutes"),
             "indicators": ind, "errors": errors}
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-    print(f"완료: {len(fresh)}개 갱신, {len(errors)}개 오류")
 
 
 if __name__ == "__main__":
