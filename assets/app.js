@@ -19,7 +19,8 @@
     re: [
       { title: "전국 아파트 · 주간 변동률", ids: ["re_sale", "re_jeonse"] },
       { title: "지역별 주간 변동률", ids: ["re_map"] },
-      { title: "서울 아파트 매물", ids: ["re_listing_seoul"] },
+      { title: "KB 주간 증감률 · 서울/경기", ids: ["re_kb_weekly"] },
+      { title: "KB 시장 분위기 · 매수우위/거래/전세수급", ids: ["re_kb_market"] },
       { title: "서울 아파트 입주물량", ids: ["re_supply_seoul"] },
       { title: "거래 · 대출", ids: ["re_trade_seoul", "mortgage"] },
     ],
@@ -35,7 +36,7 @@
     gold: "금 (COMEX 선물)", jgb3: "일본 국채 3년", jgb10: "일본 국채 10년",
     bund3: "독일 국채 3년", bund10: "독일 국채 10년",
     re_sale: "전국 아파트 매매가격지수", re_jeonse: "전국 아파트 전세가격지수",
-    re_listing_seoul: "서울 아파트 매물 수", re_supply_seoul: "서울 아파트 입주물량",
+    re_kb_weekly: "KB 주간 아파트 증감률", re_kb_market: "KB 시장 분위기 지수", re_supply_seoul: "서울 아파트 입주물량",
     re_trade_seoul: "서울 아파트 매매거래량", mortgage: "주담대 금리 (신규취급)",
   };
   const NOTES = {
@@ -45,11 +46,15 @@
     re_trade_seoul: "최근 1~2개월은 신고 기한(30일)이 남아 적게 잡힐 수 있어요.",
   };
   const PERIOD = { D: "전일 대비", W: "전주 대비", M: "전월 대비" };
-  const WIDE = new Set(["kr_flow", "re_sale", "re_jeonse", "re_trade_seoul", "re_listing_seoul"]);
+  const WIDE = new Set(["kr_flow", "re_sale", "re_jeonse", "re_trade_seoul", "re_kb_market"]);
   const BAR_IDS = new Set(["re_trade_seoul"]);
   const COUNT_UNITS = new Set(["건", "가구"]);
   const MAP_VIEWS = { nation: "전국", seoul: "서울", metro: "경기 · 인천" };
-  const LIST_KINDS = [["deal", "매매"], ["lease", "전세"], ["rent", "월세"]];
+  const KBM_KINDS = {
+    buy: ["매수우위", "중개업소에 매수자와 매도자 중 누가 많은지 물어 만든 지수예요. 100보다 크면 사려는 사람이, 작으면 팔려는 사람이 많아요."],
+    trade: ["매매거래", "중개업소에 매매 거래가 활발한지 한산한지 물어 만든 지수예요. 100보다 크면 활발, 작으면 한산해요."],
+    jeonse: ["전세수급", "중개업소에 전세 수요에 비해 공급이 부족한지 충분한지 물어 만든 지수예요. 100보다 크면 전세 공급 부족(전셋값 상승 압력)이에요."],
+  };
   const SECTOR_PERIODS = { "1D": "1일", "1W": "1주", "1M": "1개월", YTD: "연초 이후" };
   const WEEKS_SHOWN = 26;
   // 지도 색: 하락은 진한 파랑, 상승은 빨강 (연한 → 진한)
@@ -65,11 +70,16 @@
   let tab = "kr";
   let rankKind = "sale";
   let mapView = "nation";
-  let listKind = 0;       // 매물: 0 매매, 1 전세, 2 월세
-  let listGu = "서울";    // 매물: "서울" 이면 서울 전체
-  let listOpen = false;   // 매물: 구별 목록 펼침 여부
+  let kbmKind = "buy";    // KB 시장 분위기: buy / trade / jeonse
+  let kbmRegion = "서울";
   let supplyYear = null;  // 입주물량: 단지 목록을 펼친 연도
   let sectorPeriod = "1D"; // 섹터: 등락 기간
+  let KB = null;           // KB 주간 증감률 (data/kb_weekly.json, 필요할 때만 불러옴)
+  let kbLoading = null;
+  let kbView = "seoul", kbKind = "sale";
+  let kbStart = null;      // 누적 계산 시작일 (null 이면 처음부터)
+  let kbRows = 52;         // 표에 보여 줄 주 수
+  let kbScrollX = 0;       // 다시 그려도 가로 스크롤 위치 유지
 
   const store = {
     get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -576,68 +586,130 @@
       <div class="note">세대수는 청약홈 모집공고의 공급(분양) 세대 기준이라 조합원·임대분이 빠져 막대 값보다 작아요.</div></div>`;
   }
 
-  // ---------- 서울 아파트 매물 수 (네이버 부동산, 날짜별로 쌓음) ----------
-  function listingCard(id, ind) {
+  // ---------- KB 시장 분위기 지수 (중개업소 설문, 100 기준) ----------
+  function kbMarketCard(id, ind) {
     const card = cardShell(id, ind, "span-2");
-    const H = ind.history;
-    const gus = Object.keys(H).filter((g) => g !== "서울").sort((a, b) => a.localeCompare(b, "ko"));
-    if (!H[listGu]) listGu = "서울";
-    const k = listKind + 1; // 행: [날짜, 매매, 전세, 월세]
-    const rows = H[listGu];
-    const last = rows[rows.length - 1];
-    // 비교 기준: 30일 전과 가장 가까운 기록 (기록이 짧으면 가장 오래된 기록)
-    const baseOf = (rs) => {
-      const target = new Date(rs[rs.length - 1][0]); target.setDate(target.getDate() - 30);
-      const t = target.toISOString().slice(0, 10);
-      return [...rs].reverse().find((r) => r[0] <= t) || rs[0];
-    };
-    const base = baseOf(rows);
-    const days = Math.round((new Date(last[0]) - new Date(base[0])) / 864e5);
-    const diff = last[k] - base[k];
-    const d = dirOf(diff, 0);
-    const pct = base[k] ? (diff / base[k]) * 100 : 0;
-    const deltaHtml = days
-      ? `<span class="lbl">${days}일 전 대비</span><span class="${d}-t">${ARROW[d]} ${fmt(Math.abs(diff), 0)}건 (${sign(+pct.toFixed(1))}${fmt(Math.abs(pct), 1)}%)</span>`
-      : `<span class="lbl">추이는 오늘부터 하루씩 쌓여요</span>`;
-
-    // 구별 증감 목록
-    const items = gus.map((g) => {
-      const rs = H[g], b = baseOf(rs), l = rs[rs.length - 1];
-      return { g, now: l[k], chg: b[k] ? (l[k] / b[k] - 1) * 100 : 0 };
-    }).sort((a, b) => (days ? b.chg - a.chg : b.now - a.now));
-    const maxAbs = Math.max(0.1, ...items.map((i) => Math.abs(i.chg)));
+    const idx = ind.indexes[kbmKind] || Object.values(ind.indexes)[0];
+    const regs = idx.regions;
+    if (!regs[kbmRegion]) kbmRegion = "서울";
+    const R = regs[kbmRegion], vals = R.values;
+    const s = idx.dates.map((d, i) => [d, vals[i]]).filter((p) => p[1] != null);
+    const last = s[s.length - 1][1], prev = s.length > 1 ? s[s.length - 2][1] : last;
+    const d = dirOf(last - prev, 1);
+    const side = (v) => (v > 100 ? "up" : v < 100 ? "down" : "flat");
+    const pos = (v) => Math.min(100, Math.max(0, v / 2)); // 0~200 → 0~100%
+    const lastOf = (r) => r.values.filter((v) => v != null).slice(-2);
+    const ys = s.map((p) => p[1]);
+    const has100 = Math.min(...ys) <= 100 && Math.max(...ys) >= 100; // 100 기준선이 범위 안에 있을 때만 그림
 
     card.insertAdjacentHTML("beforeend", `
       <div class="lst-top">
-        <div class="seg" role="group" aria-label="거래 종류">${LIST_KINDS.map(([, v], i) => `
-          <button type="button" data-lkind="${i}" aria-pressed="${listKind === i}">${v}</button>`).join("")}</div>
-        <select class="lst-gu" aria-label="지역 선택">
-          <option value="서울"${listGu === "서울" ? " selected" : ""}>서울 전체</option>
-          ${gus.map((g) => `<option${g === listGu ? " selected" : ""}>${esc(g)}</option>`).join("")}
-        </select>
+        <div class="seg" role="group" aria-label="지수 선택">${Object.entries(KBM_KINDS).map(([k, v]) => `
+          <button type="button" data-kbm="${k}" aria-pressed="${kbmKind === k}">${v[0]}</button>`).join("")}</div>
+        <select class="lst-gu kbm-region" aria-label="지역 선택">${Object.keys(regs).map((n) => `
+          <option${n === kbmRegion ? " selected" : ""}>${esc(n)}</option>`).join("")}</select>
       </div>
-      <div class="value">${fmt(last[k], 0)}<small>건</small></div>
-      <div class="delta">${deltaHtml}</div>
-      <div class="sub">${esc(listGu === "서울" ? "서울 전체" : listGu)} ${LIST_KINDS[listKind][1]} 매물</div>
-      ${rows.length > 1 ? `<div class="chart"></div>` : ""}
-      <details class="lst"${listOpen ? " open" : ""}><summary>구별 ${days ? `${days}일 증감` : "매물 수"} · 눌러서 선택</summary>
-        <ol>${items.map((it) => {
-          const dd = dirOf(it.chg, 1);
-          return `<li data-gu="${esc(it.g)}"${it.g === listGu ? ' class="sel"' : ""}><span class="nm">${esc(it.g)}</span>
-            <span class="gbar">${days ? `<i style="width:${(Math.abs(it.chg) / maxAbs) * 100}%;background:var(--${dd === "flat" ? "flat" : dd})"></i>` : ""}</span>
-            <span class="pc">${fmt(it.now, 0)}</span>
-            ${days ? `<span class="pc ${dd}-t">${sign(+it.chg.toFixed(1))}${fmt(Math.abs(it.chg), 1)}%</span>` : ""}</li>`;
-        }).join("")}</ol></details>
-      <div class="note">네이버 부동산에 올라온 아파트 매물 수예요(같은 집을 여러 중개사가 올리면 중복돼요). 비공식 수집이라 가끔 빠질 수 있어요.</div>
-      <div class="card-foot"><span>${esc(longDate(rows[0][0]))}부터 기록</span><span>${esc(ind.source)}</span></div>`);
+      <div class="value">${fmt(last, 1)}</div>
+      <div class="delta"><span class="lbl">전주 대비</span>${d === "flat" ? '<span class="flat-t">변동 없음</span>'
+        : `<span class="${d}-t">${ARROW[d]} ${fmt(Math.abs(last - prev), 1)}</span>`}</div>
+      <div class="kbm-parts">${R.parts.map(([n, v], i) => `<i class="p${i}" style="width:${v}%"></i>`).join("")}</div>
+      <div class="kbm-key">${R.parts.map(([n, v], i) => `<span><i class="p${i}"></i>${esc(n)} ${fmt(v, 1)}%</span>`).join("")}</div>
+      <div class="sub" style="margin-top:10px">${esc(kbmRegion)} ${esc(idx.label)}${has100 ? " · 진한 점선 = 100" : ""}</div>
+      <div class="chart"></div>
+      <div class="sec-rows kbm-list">${Object.entries(regs).map(([n, r]) => {
+        const [a, b] = lastOf(r), cd = dirOf((b ?? a) - a, 1), v = b ?? a;
+        const bar = v >= 100 ? `left:50%;width:${pos(v) - 50}%` : `left:${pos(v)}%;width:${50 - pos(v)}%`;
+        return `<div class="sec-row${n === kbmRegion ? " sel" : ""}" data-kbmr="${esc(n)}"><span class="nm">${esc(n)}</span>
+          <span class="dbar"><i style="${bar};background:var(--${side(v)})"></i></span>
+          <span class="num">${fmt(v, 1)} <small class="${cd}-t">${cd === "flat" ? "" : ARROW[cd]}</small></span></div>`;
+      }).join("")}</div>
+      <div class="note">${KBM_KINDS[kbmKind][1]}</div>
+      <div class="card-foot"><span>최근 3년 · 주간</span><span>${esc(ind.source)}</span></div>`);
 
     const box = $(".chart", card);
-    if (box) {
-      const s = rows.map((r) => [r[0], r[k]]);
-      charts.push(() => bindLineHover(box, lineChart(box, s, `${listGu} 매물`), s, (v) => `${fmt(v, 0)}건`));
+    charts.push(() => {
+      const ch = lineChart(box, s, idx.label);
+      if (!ch) return;
+      if (has100) {
+        $("svg", box).insertBefore(el("line", { x1: 0, x2: box.clientWidth, y1: ch.y(100), y2: ch.y(100),
+          style: "stroke:var(--ink-2);opacity:.5", "stroke-dasharray": "4 3" }), ch.guide);
+      }
+      bindLineHover(box, ch, s, (v) => fmt(v, 1));
+    });
+    $(".kbm-region", card).addEventListener("change", (e) => { kbmRegion = e.target.value; render(); });
+    return card;
+  }
+
+  // ---------- KB 주간 증감률 표 ----------
+  function loadKb(ind) {
+    kbLoading ||= fetch(`${ind.file}?v=${ind.asof}`)
+      .then((r) => r.json())
+      .then((k) => { KB = k; if (tab === "re") render(); })
+      .catch(() => { kbLoading = null; });
+    return kbLoading;
+  }
+
+  // 표 칸 색: domain 이상이면 가장 진하게, 0.00 이면 칸 색 없음
+  function heat(v, domain) {
+    if (v == null || +v.toFixed(2) === 0) return "";
+    const i = Math.min(4, Math.floor((Math.abs(v) / domain) * 5));
+    return ` style="background:${(v > 0 ? RED : BLUE)[i]};color:${i >= 3 ? "#fff" : "#1a1a19"}"`;
+  }
+
+  function kbCard(id, ind) {
+    const card = cardShell(id, ind, "span-all kb-card");
+    if (!KB) {
+      loadKb(ind);
+      card.insertAdjacentHTML("beforeend", `<div class="empty">표를 불러오는 중이에요</div>`);
+      return card;
     }
-    $(".lst-gu", card).addEventListener("change", (e) => { listGu = e.target.value; render(); });
-    $("details.lst", card).addEventListener("toggle", (e) => { listOpen = e.target.open; });
+    const dates = KB.dates, scale = KB.scale || 1;
+    const regions = KB.regions[kbView] || [];
+    const start = kbStart && kbStart > dates[0] ? kbStart : dates[0];
+    const from = Math.max(0, dates.findLastIndex((d) => d <= start)); // 시작 주(기준) 다음 주부터 누적
+    const cum = regions.map((r) => {
+      let c = 1;
+      for (let i = from + 1; i < dates.length; i++) c *= 1 + (r[kbKind][i] ?? 0) / scale / 100;
+      return (c - 1) * 100;
+    });
+    const cumDomain = Math.max(1, ...cum.map(Math.abs));
+    const shown = [];
+    for (let i = dates.length - 1; i > from && shown.length < kbRows; i--) shown.push(i);
+    const total = dates.length - 1 - from;
+    const short = (n) => n.replace(/^(.+?)시 (.+구)$/, "$1 $2");
+    const val = (v) => (v == null ? "" : `${sign(+v.toFixed(2))}${fmt(Math.abs(v), 2)}`);
+
+    card.insertAdjacentHTML("beforeend", `
+      <div class="kb-top">
+        <div class="seg" role="group" aria-label="지역">
+          <button type="button" data-kbview="seoul" aria-pressed="${kbView === "seoul"}">서울</button>
+          <button type="button" data-kbview="gyeonggi" aria-pressed="${kbView === "gyeonggi"}">경기</button>
+        </div>
+        <div class="seg" role="group" aria-label="매매/전세">
+          <button type="button" data-kbkind="sale" aria-pressed="${kbKind === "sale"}">매매</button>
+          <button type="button" data-kbkind="jeonse" aria-pressed="${kbKind === "jeonse"}">전세</button>
+        </div>
+        <label class="kb-start">시작일 <input type="date" value="${start}" min="${dates[0]}" max="${dates[dates.length - 1]}"></label>
+      </div>
+      <div class="kb-wrap"><table class="kb">
+        <thead>
+          <tr class="kb-cum"><th rowspan="2">주차</th>${cum.map((c) => `<th${heat(c, cumDomain)}>${val(c)}</th>`).join("")}</tr>
+          <tr class="kb-nm">${regions.map((r, j) => `<th class="${j === 0 ? "tot" : regions.some((o) => o.name.startsWith(`${r.name} `)) ? "city" : ""}">${esc(short(r.name))}</th>`).join("")}</tr>
+        </thead>
+        <tbody>${shown.map((i) => `<tr><th>${dates[i]}</th>${regions.map((r) => {
+          const v = r[kbKind][i] == null ? null : r[kbKind][i] / scale;
+          return `<td${heat(v, 1)}>${val(v)}</td>`;
+        }).join("")}</tr>`).join("")}</tbody>
+      </table></div>
+      ${shown.length < total ? `<button type="button" class="kb-more">52주 더 보기 <small>(${shown.length}/${total}주)</small></button>` : ""}
+      <div class="note">맨 윗줄은 시작일부터 지금까지 누적 증감률이에요. 상승=빨강, 하락=파랑 · 단위 % · 최신 주차가 맨 위${kbView === "gyeonggi" ? " · 굵은 글씨 시는 아래 구들을 합친 값" : ""}.</div>
+      <div class="card-foot"><span>${kbKind === "sale" ? "매매" : "전세"}가격 주간 증감률</span><span>${esc(ind.source)}</span></div>`);
+
+    const wrap = $(".kb-wrap", card);
+    charts.push(() => { wrap.scrollLeft = kbScrollX; });
+    wrap.addEventListener("scroll", () => { kbScrollX = wrap.scrollLeft; }, { passive: true });
+    $(".kb-start input", card).addEventListener("change", (e) => { kbStart = e.target.value || null; kbRows = 52; render(); });
+    $(".kb-more", card)?.addEventListener("click", () => { kbRows += 52; render(); });
     return card;
   }
 
@@ -695,8 +767,9 @@
           : !ind ? emptyCard(id)
           : ind.type === "flow" ? flowCard(id, ind)
           : ind.type === "supply" ? supplyCard(id, ind)
-          : ind.type === "listing" ? listingCard(id, ind)
+          : ind.type === "kbmarket" ? kbMarketCard(id, ind)
           : ind.type === "sectors" ? sectorCard(id, ind)
+          : ind.type === "kb" ? kbCard(id, ind)
           : seriesCard(id, ind));
       }
       sec.append(grid);
@@ -739,12 +812,16 @@
     if (b && b.dataset.kind !== rankKind) { rankKind = b.dataset.kind; render(); }
     const v = e.target.closest(".seg button[data-view]");
     if (v && v.dataset.view !== mapView) { mapView = v.dataset.view; render(); }
-    const lk = e.target.closest(".seg button[data-lkind]");
-    if (lk && +lk.dataset.lkind !== listKind) { listKind = +lk.dataset.lkind; render(); }
+    const km = e.target.closest(".seg button[data-kbm]");
+    if (km && km.dataset.kbm !== kbmKind) { kbmKind = km.dataset.kbm; render(); }
+    const kr = e.target.closest("[data-kbmr]");
+    if (kr && kr.dataset.kbmr !== kbmRegion) { kbmRegion = kr.dataset.kbmr; render(); }
     const sp = e.target.closest(".seg button[data-speriod]");
     if (sp && sp.dataset.speriod !== sectorPeriod) { sectorPeriod = sp.dataset.speriod; render(); }
-    const g = e.target.closest("li[data-gu]");
-    if (g) { listGu = g.dataset.gu === listGu ? "서울" : g.dataset.gu; render(); }
+    const kv = e.target.closest(".seg button[data-kbview]");
+    if (kv && kv.dataset.kbview !== kbView) { kbView = kv.dataset.kbview; kbScrollX = 0; render(); }
+    const kk = e.target.closest(".seg button[data-kbkind]");
+    if (kk && kk.dataset.kbkind !== kbKind) { kbKind = kk.dataset.kbkind; render(); }
   });
   addEventListener("hashchange", () => setTab(location.hash.slice(1), false));
   let resizeTimer, lastW = innerWidth;

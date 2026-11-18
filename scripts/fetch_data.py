@@ -21,6 +21,7 @@ import re
 import ssl
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -35,6 +36,7 @@ except ImportError:
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "data" / "data.json"
 SUPPLY_FILE = ROOT / "data" / "manual" / "seoul_supply.json"
+KB_FILE = ROOT / "data" / "kb_weekly.json"  # 크기가 커서(2008년~) 따로 두고 화면에서 필요할 때만 불러온다
 KST = dt.timezone(dt.timedelta(hours=9))
 TODAY = dt.datetime.now(KST).date()
 
@@ -67,15 +69,9 @@ SECTORS = [
     ("XLE", "에너지"), ("XLF", "금융"), ("XLV", "헬스케어"), ("XLI", "산업재"),
     ("XLB", "소재"), ("XLRE", "부동산"), ("XLU", "유틸리티"),
 ]
-# 아침 실행(미국 마감 반영용)에서는 네이버 매물 수집을 건너뛴다 (하루 두 번 접속하면 차단 위험)
-SKIP_LISTINGS = os.environ.get("SKIP_LISTINGS") == "1"
 # 목요일 14시 실행: 부동산원 주간 아파트 동향(목요일 14시 공표)만 새로 받고 나머지는 그대로 둔다
 WEEKLY_ONLY = os.environ.get("WEEKLY_ONLY") == "1"
 WEEKLY_KEYS = {"re_sale", "re_jeonse", "re_rank_sale", "re_rank_jeonse"}
-NAVER_LAND = "https://m.land.naver.com"
-SEOUL_CORTAR = "1100000000"
-BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/130.0 Safari/537.36")
 
 
 def get_bytes(url, params=None, headers=None, tries=3):
@@ -342,57 +338,84 @@ def seoul_trades():
     return [[f"{k[:4]}-{k[4:]}", by_month[k]] for k in sorted(by_month)]
 
 
-def seoul_listings(old):
-    """네이버 부동산 서울 아파트 매물 수(매매·전세·월세)를 구별로 합산해 날짜별로 쌓는다.
 
-    네이버는 현재 매물 수만 보여 주므로 추이는 매일 실행하며 직접 쌓는다 (최근 400일 보관).
-    비공식 경로라 막히거나 구조가 바뀌면 실패할 수 있다.
+def kb_weekly():
+    """KB부동산 주간 아파트 매매·전세 증감률(%) — 서울·경기 시군구, 2008년 4월부터 전체.
+
+    결과는 data/kb_weekly.json 에 따로 쓰고, data.json 에는 요약(기준일)만 남긴다.
     """
-    headers = {"User-Agent": BROWSER_UA, "Referer": f"{NAVER_LAND}/"}
-    streak = 0  # 연속 실패 수: 차단(/error/abuse)되면 오래 매달리지 않고 바로 포기한다
-
-    def call(path, cortar):
-        nonlocal streak
-        time.sleep(1.0)  # 빠르게 연속 호출하면 차단되므로 천천히
-        try:
-            d = get_json(f"{NAVER_LAND}{path}", {"cortarNo": cortar}, headers)
-            streak = 0
-            return d["result"]
-        except Exception:
-            streak += 1
-            if streak >= 5:
-                raise RuntimeError("네이버 부동산 접속이 막혔어요 (연속 5회 실패)") from None
-            return None
-
-    today, counts, failed, total_dongs = TODAY.isoformat(), {}, 0, 0
-    for gu in (call("/map/getRegionList", SEOUL_CORTAR) or {}).get("list", []):
-        dongs = call("/map/getRegionList", gu["CortarNo"])
-        if not dongs:
-            continue  # 이 구는 빠지고, 아래에서 25개 구가 안 되면 실패 처리
-        deal = lease = rent = 0
-        for dong in dongs.get("list", []):
-            total_dongs += 1
-            rows = call("/complex/ajax/complexListByCortarNo", dong["CortarNo"])
-            if rows is None:
-                failed += 1
+    url = "https://data-api.kbland.kr/bfmstat/weekMnthlyHuseTrnd/prcIndxInxrdcRt"
+    regions, dates = {"seoul": {}, "gyeonggi": {}}, set()
+    raw = {}
+    for view, code in (("seoul", "11"), ("gyeonggi", "41")):
+        for kind, trade in (("sale", "01"), ("jeonse", "02")):
+            body = get_json(url, {"월간주간구분코드": "02", "매물종별구분": "01",
+                                  "매매전세코드": trade, "지역코드": code})["dataBody"]
+            if str(body.get("resultCode")) != "11000":
+                raise RuntimeError(f"KB {view}/{kind}: {body.get('message') or body.get('resultCode')}")
+            days = [f"{d[:4]}-{d[4:6]}-{d[6:]}" for d in body["data"]["날짜리스트"]]
+            dates.update(days)
+            for r in body["data"]["데이터리스트"]:
+                reg = regions[view].setdefault(r["지역코드"], {"code": r["지역코드"], "name": r["지역명"]})
+                raw[(view, r["지역코드"], kind)] = dict(zip(days, r["dataList"]))
+                reg.setdefault("kinds", set()).add(kind)
+    dates = sorted(dates)
+    if len(dates) < 100:
+        raise RuntimeError(f"KB 주간 데이터 부족 ({len(dates)}주)")
+    out = {}
+    for view, regs in regions.items():
+        out[view] = []
+        for reg in regs.values():
+            if reg.pop("kinds") != {"sale", "jeonse"}:
                 continue
-            for r in rows:
-                if r.get("hscpTypeCd") == "A01":  # 아파트만 (오피스텔·분양권 제외)
-                    deal += r.get("dealCnt") or 0
-                    lease += r.get("leaseCnt") or 0
-                    rent += r.get("rentCnt") or 0
-        counts[gu["CortarNm"]] = [deal, lease, rent]
-    if len(counts) < 25 or failed > total_dongs * 0.05:
-        raise RuntimeError(f"네이버 매물 수집 불완전 (구 {len(counts)}개, 동 실패 {failed}/{total_dongs})")
-    counts["서울"] = [sum(v[i] for v in counts.values()) for i in range(3)]
+            for kind in ("sale", "jeonse"):
+                vals = raw[(view, reg["code"], kind)]  # 파일 크기를 줄이려고 1/1000 % 단위 정수로 저장
+                reg[kind] = [None if vals.get(d) is None else round(vals[d] * 1000) for d in dates]
+            out[view].append(reg)
+        if len(out[view]) < 20:
+            raise RuntimeError(f"KB {view} 지역 수 부족 ({len(out[view])}개)")
+    KB_FILE.write_text(json.dumps({"dates": dates, "scale": 1000, "regions": out},
+                                  ensure_ascii=False, separators=(",", ":")),
+                       encoding="utf-8")
+    return {"type": "kb", "name": "KB 주간 아파트 증감률", "freq": "W", "source": "KB부동산 데이터허브",
+            "asof": dates[-1], "first": dates[0], "file": "data/kb_weekly.json"}
 
-    history = (old or {}).get("history") or {}
-    cutoff = days_ago(400).isoformat()
-    for name, v in counts.items():
-        rows = [r for r in history.get(name, []) if r[0] != today and r[0] >= cutoff]
-        history[name] = rows + [[today, *v]]
-    return {"type": "listing", "name": "서울 아파트 매물 수", "unit": "건", "freq": "D",
-            "source": "네이버 부동산", "asof": today, "history": history}
+
+def kb_market():
+    """KB 주간 시장 분위기 지수 (중개업소 설문): 매수우위 / 매매거래활발 / 전세수급, 최근 3년.
+
+    지수 = 100 + (앞 응답 비중 − 뒤 응답 비중). 100 보다 크면 매수자 많음 / 거래 활발 / 공급 부족.
+    """
+    url = "https://data-api.kbland.kr/bfmstat/weekMnthlyHuseTrnd/maktTrnd"
+    menus = (("buy", "01", "매수우위지수", ("매수자많음", "비슷함", "매도자많음"), ("매수자 많음", "비슷함", "매도자 많음")),
+             ("trade", "02", "매매거래지수", ("활발함", "보통", "한산함"), ("활발함", "보통", "한산함")),
+             ("jeonse", "03", "전세수급지수", ("공급부족", "공급적절", "공급충분"), ("공급 부족", "적절", "공급 충분")))
+    keep = ("전국", "서울", "강북14개구", "강남11개구", "수도권", "경기", "인천", "6개광역시", "기타지방")
+    start = days_ago(3 * 365 + 7).strftime("%Y%m%d")
+    indexes, asof = {}, None
+    for key, menu, label, fields, names in menus:
+        body = get_json(url, {"메뉴코드": menu, "월간주간구분코드": "02"})["dataBody"]
+        if str(body.get("resultCode")) != "11000":
+            raise RuntimeError(f"KB {label}: {body.get('message') or body.get('resultCode')}")
+        days = body["data"]["날짜리스트"]
+        cut = next(i for i, d in enumerate(days + ["99999999"]) if d >= start)
+        regions = {}
+        for r in body["data"]["데이터리스트"]:
+            vals = [(v or {}).get(label) for v in r["dataList"][cut:]]
+            if r["지역명"] not in keep or vals[-1:] in ([], [None]):
+                continue
+            last = r["dataList"][-1]
+            regions[r["지역명"]] = {
+                "values": [None if v is None else round(v, 1) for v in vals],
+                "parts": [[n, round(last.get(f) or 0, 1)] for f, n in zip(fields, names)],
+            }
+        if "서울" not in regions:
+            raise RuntimeError(f"KB {label}: 서울 데이터 없음")
+        dates = [f"{d[:4]}-{d[4:6]}-{d[6:]}" for d in days[cut:]]  # 지역마다 같은 날짜라 한 번만 저장
+        indexes[key] = {"label": label, "dates": dates, "regions": {n: regions[n] for n in keep if n in regions}}
+        asof = max(asof or "", dates[-1])
+    return {"type": "kbmarket", "name": "KB 시장 분위기 지수", "freq": "W", "source": "KB부동산 데이터허브",
+            "asof": asof, "indexes": indexes}
 
 
 def period_changes(series):
@@ -664,16 +687,17 @@ def main():
     except Exception as e:  # noqa: BLE001
         keep_old("kr_flow", e)
 
-    if SKIP_LISTINGS:
-        if "re_listing_seoul" in old:
-            ind["re_listing_seoul"] = old["re_listing_seoul"]
-        print("  - re_listing_seoul (아침 실행이라 건너뜀)")
-    else:
-        try:
-            ind["re_listing_seoul"] = seoul_listings(old.get("re_listing_seoul"))
-            print(f"  ✓ re_listing_seoul (서울 매물 {ind['re_listing_seoul']['history']['서울'][-1][1:]})")
-        except Exception as e:  # noqa: BLE001
-            keep_old("re_listing_seoul", e)
+    try:
+        ind["re_kb_weekly"] = kb_weekly()
+        print(f"  ✓ re_kb_weekly ({ind['re_kb_weekly']['asof']}, {KB_FILE.stat().st_size // 1024} KB)")
+    except Exception as e:  # noqa: BLE001 - 실패하면 kb_weekly.json 은 지난 파일 그대로
+        keep_old("re_kb_weekly", e)
+
+    try:
+        ind["re_kb_market"] = kb_market()
+        print(f"  ✓ re_kb_market ({ind['re_kb_market']['asof']})")
+    except Exception as e:  # noqa: BLE001
+        keep_old("re_kb_market", e)
 
     try:
         ind["re_supply_seoul"] = seoul_supply(errors)
