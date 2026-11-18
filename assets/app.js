@@ -16,12 +16,19 @@
       { title: "금 · 해외 국채", ids: ["gold", "jgb3", "jgb10", "bund3", "bund10"] },
       { title: "물가 · 고용", ids: ["cpi", "unrate"] },
     ],
+    // 부동산: 주간시세 / KB시계열 / 신고가 / 공급·거래
     re: [
       { title: "전국 아파트 · 주간 변동률", ids: ["re_sale", "re_jeonse"] },
-      { title: "서울 · 경기 신고가 · 최근 1주", ids: ["re_highs"] },
       { title: "지역별 주간 변동률", ids: ["re_map"] },
+    ],
+    kb: [
       { title: "KB 주간 증감률 · 서울/경기", ids: ["re_kb_weekly"] },
       { title: "KB 시장 분위기 · 매수우위/거래/전세수급", ids: ["re_kb_market"] },
+    ],
+    high: [
+      { title: "서울 · 경기 신고가 · 최근 1주", ids: ["re_highs"] },
+    ],
+    supply: [
       { title: "서울 아파트 입주물량", ids: ["re_supply_seoul"] },
       { title: "거래 · 대출", ids: ["re_trade_seoul", "mortgage"] },
     ],
@@ -83,6 +90,8 @@
   let kbStart = null;      // 누적 계산 시작일 (null 이면 처음부터)
   let kbRows = 52;         // 표에 보여 줄 주 수
   let kbScrollX = 0;       // 다시 그려도 가로 스크롤 위치 유지
+  let KB_GROUPS = null;    // 지역 묶음(급지) 설정
+  let kbGrouped = true;    // 급지별로 묶어 보기
 
   const store = {
     get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -686,11 +695,40 @@
 
   // ---------- KB 주간 증감률 표 ----------
   function loadKb(ind) {
-    kbLoading ||= fetch(`${ind.file}?v=${ind.asof}`)
-      .then((r) => r.json())
-      .then((k) => { KB = k; if (tab === "re") render(); })
+    // 지역 묶음(급지)은 data/manual/kb_groups.json 에서 — 없거나 깨져도 표는 기본 순서로 보여 준다
+    const groups = fetch(`data/manual/kb_groups.json?v=${Date.now()}`).then((r) => r.json()).catch(() => ({}));
+    kbLoading ||= Promise.all([fetch(`${ind.file}?v=${ind.asof}`).then((r) => r.json()), groups])
+      .then(([k, g]) => { KB = k; KB_GROUPS = g || {}; if (tab === "kb") render(); })
       .catch(() => { kbLoading = null; });
     return kbLoading;
+  }
+
+  // 표에 그릴 열 목록: 지역 전체 → (묶음마다) 평균 + 소속 지역 → 그 외
+  function kbColumns(regions, groups, scale) {
+    const own = (r) => (i) => (r[kbKind][i] == null ? null : r[kbKind][i] / scale);
+    const cols = [{ name: regions[0].name, kind: "tot", get: own(regions[0]), g: -1 }];
+    const byName = new Map(regions.slice(1).map((r) => [r.name, r]));
+    const used = new Set();
+    (groups || []).forEach((grp, g) => {
+      const members = (grp.members || []).map((n) => byName.get(n)).filter(Boolean);
+      if (!members.length) return;
+      members.forEach((r) => used.add(r.name));
+      const gets = members.map(own);
+      if (grp.avg !== false && members.length > 1) { // "avg": false 면 평균 칸 없이 순서만 맞춘다
+        cols.push({ name: `${grp.name} 평균`, kind: "avg", g, label: grp.name, get: (i) => {
+          const vs = gets.map((f) => f(i)).filter((v) => v != null);
+          return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null;
+        } });
+      }
+      members.forEach((r) => cols.push({ name: r.name, kind: "gu", g, label: grp.name, get: own(r),
+        city: regions.some((o) => o.name.startsWith(`${r.name} `)),
+        cmp: grp.avg !== false && members.length === 1 })); // 한 곳뿐인 묶음은 그 지역으로 비교
+    });
+    const rest = regions.slice(1).filter((r) => !used.has(r.name));
+    const g = cols.length > 1 ? (groups || []).length : -1;
+    rest.forEach((r) => cols.push({ name: r.name, kind: "gu", g, label: g >= 0 ? "그 외" : "", get: own(r),
+      city: regions.some((o) => o.name.startsWith(`${r.name} `)) }));
+    return cols;
   }
 
   // 표 칸 색: domain 이상이면 가장 진하게, 0.00 이면 칸 색 없음
@@ -709,14 +747,33 @@
     }
     const dates = KB.dates, scale = KB.scale || 1;
     const regions = KB.regions[kbView] || [];
+    const groups = KB_GROUPS?.[kbView] || [];
+    const grouped = kbGrouped && groups.length > 0;
+    const cols = kbColumns(regions, grouped ? groups : [], scale);
     const start = kbStart && kbStart > dates[0] ? kbStart : dates[0];
     const from = Math.max(0, dates.findLastIndex((d) => d <= start)); // 시작 주(기준) 다음 주부터 누적
-    const cum = regions.map((r) => {
-      let c = 1;
-      for (let i = from + 1; i < dates.length; i++) c *= 1 + (r[kbKind][i] ?? 0) / scale / 100;
-      return (c - 1) * 100;
+    const cum = cols.map((c) => {
+      let x = 1;
+      for (let i = from + 1; i < dates.length; i++) x *= 1 + (c.get(i) ?? 0) / 100;
+      return (x - 1) * 100;
     });
     const cumDomain = Math.max(1, ...cum.map(Math.abs));
+    // 묶음 머리줄: 묶음별로 칸을 합치고, 묶음 평균 누적을 지역 전체(맨 앞 열)와 비교
+    const spans = [];
+    cols.forEach((c, j) => {
+      if (j === 0) return;
+      const last = spans[spans.length - 1];
+      if (last && last.g === c.g) last.n += 1;
+      else spans.push({ g: c.g, n: 1, label: c.label || "", j });
+    });
+    const grpHead = spans.map((s) => {
+      const avg = cols[s.j].kind === "avg" || cols[s.j].cmp ? cum[s.j] - cum[0] : null;
+      const vs = avg == null ? "" : ` <span class="${dirOf(avg)}-t">${cols[0].name} 대비 ${sign(+avg.toFixed(1))}${fmt(Math.abs(avg), 1)}%p</span>`;
+      return `<th colspan="${s.n}" class="gs gh${s.g % 2 ? " alt" : ""}">${esc(s.label)}${vs}</th>`;
+    }).join("");
+    const gsSet = new Set(spans.map((s) => s.j)); // 묶음이 시작하는 열: 굵은 세로줄
+    const cls = (c, j) => [c.kind === "tot" || c.kind === "avg" || c.city ? "tot" : "",
+      grouped && gsSet.has(j) ? "gs" : "", grouped && c.g >= 0 && c.g % 2 ? "alt" : ""].filter(Boolean).join(" ");
     const shown = [];
     for (let i = dates.length - 1; i > from && shown.length < kbRows; i--) shown.push(i);
     const total = dates.length - 1 - from;
@@ -734,19 +791,24 @@
           <button type="button" data-kbkind="jeonse" aria-pressed="${kbKind === "jeonse"}">전세</button>
         </div>
         <label class="kb-start">시작일 <input type="date" value="${start}" min="${dates[0]}" max="${dates[dates.length - 1]}"></label>
+        ${groups.length ? `<div class="seg" role="group" aria-label="보기 방식">
+          <button type="button" data-kbgrp="1" aria-pressed="${kbGrouped}">급지별</button>
+          <button type="button" data-kbgrp="0" aria-pressed="${!kbGrouped}">기본 순서</button>
+        </div>` : ""}
       </div>
-      <div class="kb-wrap"><table class="kb">
+      <div class="kb-wrap"><table class="kb${grouped ? " has-grp" : ""}">
         <thead>
-          <tr class="kb-cum"><th rowspan="2">주차</th>${cum.map((c) => `<th${heat(c, cumDomain)}>${val(c)}</th>`).join("")}</tr>
-          <tr class="kb-nm">${regions.map((r, j) => `<th class="${j === 0 ? "tot" : regions.some((o) => o.name.startsWith(`${r.name} `)) ? "city" : ""}">${esc(short(r.name))}</th>`).join("")}</tr>
+          ${grouped ? `<tr class="kb-grp"><th rowspan="3">주차</th><th class="tot"></th>${grpHead}</tr>` : ""}
+          <tr class="kb-cum">${grouped ? "" : `<th rowspan="2">주차</th>`}${cum.map((c, j) => `<th class="${cls(cols[j], j)}"${heat(c, cumDomain)}>${val(c)}</th>`).join("")}</tr>
+          <tr class="kb-nm">${cols.map((c, j) => `<th class="${cls(c, j)}">${esc(short(c.name))}</th>`).join("")}</tr>
         </thead>
-        <tbody>${shown.map((i) => `<tr><th>${dates[i]}</th>${regions.map((r) => {
-          const v = r[kbKind][i] == null ? null : r[kbKind][i] / scale;
-          return `<td${heat(v, 1)}>${val(v)}</td>`;
+        <tbody>${shown.map((i) => `<tr><th>${dates[i]}</th>${cols.map((c, j) => {
+          const v = c.get(i), k = cls(c, j);
+          return `<td${k ? ` class="${k}"` : ""}${heat(v, 1)}>${val(v)}</td>`;
         }).join("")}</tr>`).join("")}</tbody>
       </table></div>
       ${shown.length < total ? `<button type="button" class="kb-more">52주 더 보기 <small>(${shown.length}/${total}주)</small></button>` : ""}
-      <div class="note">맨 윗줄은 시작일부터 지금까지 누적 증감률이에요. 상승=빨강, 하락=파랑 · 단위 % · 최신 주차가 맨 위${kbView === "gyeonggi" ? " · 굵은 글씨 시는 아래 구들을 합친 값" : ""}.</div>
+      <div class="note">맨 윗줄은 시작일부터 지금까지 누적 증감률이에요. 상승=빨강, 하락=파랑 · 단위 % · 최신 주차가 맨 위${grouped ? ` · '평균'은 묶음 안 지역들의 주간 증감률을 단순 평균한 값이고, 묶음 이름 옆은 ${esc(cols[0].name)} 전체 누적과의 차이예요` : ""}${kbView === "gyeonggi" ? " · 굵은 글씨 시는 아래 구들을 합친 값" : ""}.</div>
       <div class="card-foot"><span>${kbKind === "sale" ? "매매" : "전세"}가격 주간 증감률</span><span>${esc(ind.source)}</span></div>`);
 
     const wrap = $(".kb-wrap", card);
@@ -871,6 +933,8 @@
     if (kv && kv.dataset.kbview !== kbView) { kbView = kv.dataset.kbview; kbScrollX = 0; render(); }
     const kk = e.target.closest(".seg button[data-kbkind]");
     if (kk && kk.dataset.kbkind !== kbKind) { kbKind = kk.dataset.kbkind; render(); }
+    const kg = e.target.closest(".seg button[data-kbgrp]");
+    if (kg && (kg.dataset.kbgrp === "1") !== kbGrouped) { kbGrouped = kg.dataset.kbgrp === "1"; kbScrollX = 0; render(); }
   });
   addEventListener("hashchange", () => setTab(location.hash.slice(1), false));
   let resizeTimer, lastW = innerWidth;
