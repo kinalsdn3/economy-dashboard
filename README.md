@@ -22,6 +22,7 @@ GitHub Pages로 호스팅되고, GitHub Actions가 매일 데이터를 갱신합
 | 부동산 | 전국 아파트 매매·전세가격지수 주간 변동률 | 한국부동산원 R-ONE |
 | | 주간 변동률 지도 (전국 17개 시도 / 서울 / 경기·인천) + 상승·하락 TOP10 (매매/전세 전환) | R-ONE, 경계: 통계청(vuski/admdongkor) |
 | | KB 주간 아파트 매매·전세 증감률 표 (서울·경기 시군구, 2008년~, 시작일부터 누적) — `data/kb_weekly.json`에 따로 저장 | KB부동산 데이터허브 (키 불필요) |
+| | 서울·경기 아파트 신고가 (전용 59/84㎡대, 최근 7일, 2019년 이후 최고가 기준) — 최고가표는 Actions 캐시(`state/`)에 보관, 첫 실행 후 며칠간 과거 거래를 모음 | 국토교통부 실거래가 + 공동주택(K-apt) 세대수 |
 | | KB 시장 분위기 지수: 매수우위·매매거래·전세수급 (전국·서울·강북/강남·수도권·경기·인천 등, 최근 3년) | KB부동산 데이터허브 (키 불필요) |
 | | 서울 아파트 입주물량 2020–2030 + 연도별 입주 예정 단지 | 막대: **수기 입력** (부동산R114 보도 기준) / 단지: 청약홈 + 수기 보충 |
 | | 서울 아파트 매매거래량, 주택담보대출 금리 | R-ONE, 한국은행 ECOS |
@@ -43,7 +44,7 @@ GitHub Pages로 호스팅되고, GitHub Actions가 매일 데이터를 갱신합
 | `ECOS_API_KEY` | [한국은행 ECOS Open API](https://ecos.bok.or.kr/api/) → 인증키 신청 |
 | `FRED_API_KEY` | [FRED API Keys](https://fredaccount.stlouisfed.org/apikeys) → 계정 생성 후 Request API Key |
 | `REB_API_KEY` | [한국부동산원 R-ONE Open API](https://www.reb.or.kr/r-one/portal/openapi/openApiIntroPage.do) → 인증키 신청 |
-| `DATA_GO_KR_KEY` | [공공데이터포털 청약홈 분양정보 조회 서비스](https://www.data.go.kr/data/15098547/openapi.do) → 활용신청 후 마이페이지의 **일반 인증키(Decoding)** |
+| `DATA_GO_KR_KEY` | [공공데이터포털 청약홈 분양정보 조회 서비스](https://www.data.go.kr/data/15098547/openapi.do) → 활용신청 후 마이페이지의 **일반 인증키(Decoding)**. 같은 키로 [아파트 매매 실거래가 상세 자료](https://www.data.go.kr/data/15126468/openapi.do), 공동주택 단지 목록제공 서비스, [공동주택 기본 정보제공 서비스](https://www.data.go.kr/data/15058453/openapi.do)도 활용신청 (신고가·세대수) |
 
 ### 2. 저장소 만들고 파일 올리기
 

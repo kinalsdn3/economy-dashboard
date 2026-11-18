@@ -317,6 +317,23 @@ svg.map .mp { font-weight: 750; letter-spacing: -0.02em; }
 }
 .lst-gu:focus-visible { outline: 2px solid var(--down); outline-offset: 2px; }
 
+/* ---------- 신고가 ---------- */
+.hi-prog {
+  position: relative; margin-top: 10px; padding: 9px 10px 12px; border-radius: 10px;
+  background: var(--surface-2); font-size: 12.5px; color: var(--ink-2); overflow: hidden;
+}
+.hi-prog i { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--up); }
+.hi-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 0; }
+@media (min-width: 900px) { .hi-list { grid-template-columns: 1fr 1fr; column-gap: 28px; } }
+.hi-list li { padding: 10px 0; border-bottom: 1px solid var(--grid); }
+.hi-top { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.hi-nm { font-size: 14.5px; font-weight: 700; color: var(--ink); }
+.hi-px { font-size: 15px; font-weight: 750; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.hi-meta { margin-top: 3px; font-size: 12.5px; color: var(--ink-2); }
+.hi-prev { margin-top: 2px; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.hi-prev b { font-weight: 650; }
+.hi-tag { padding: 0 5px; border-radius: 4px; background: var(--surface-2); color: var(--ink-2); font-size: 11.5px; }
+
 /* ---------- KB 시장 분위기 지수 ---------- */
 .kbm-parts { display: flex; height: 10px; margin-top: 10px; border-radius: 5px; overflow: hidden; background: var(--surface-2); }
 .kbm-parts i, .kbm-key i { display: block; }

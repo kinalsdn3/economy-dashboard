@@ -18,6 +18,7 @@
     ],
     re: [
       { title: "전국 아파트 · 주간 변동률", ids: ["re_sale", "re_jeonse"] },
+      { title: "서울 · 경기 신고가 · 최근 1주", ids: ["re_highs"] },
       { title: "지역별 주간 변동률", ids: ["re_map"] },
       { title: "KB 주간 증감률 · 서울/경기", ids: ["re_kb_weekly"] },
       { title: "KB 시장 분위기 · 매수우위/거래/전세수급", ids: ["re_kb_market"] },
@@ -36,7 +37,7 @@
     gold: "금 (COMEX 선물)", jgb3: "일본 국채 3년", jgb10: "일본 국채 10년",
     bund3: "독일 국채 3년", bund10: "독일 국채 10년",
     re_sale: "전국 아파트 매매가격지수", re_jeonse: "전국 아파트 전세가격지수",
-    re_kb_weekly: "KB 주간 아파트 증감률", re_kb_market: "KB 시장 분위기 지수", re_supply_seoul: "서울 아파트 입주물량",
+    re_kb_weekly: "KB 주간 아파트 증감률", re_kb_market: "KB 시장 분위기 지수", re_highs: "서울·경기 아파트 신고가", re_supply_seoul: "서울 아파트 입주물량",
     re_trade_seoul: "서울 아파트 매매거래량", mortgage: "주담대 금리 (신규취급)",
   };
   const NOTES = {
@@ -72,6 +73,8 @@
   let mapView = "nation";
   let kbmKind = "buy";    // KB 시장 분위기: buy / trade / jeonse
   let kbmRegion = "서울";
+  let hiView = "seoul";   // 신고가: seoul / gyeonggi
+  let hiCls = "all";      // 신고가: all / 59 / 84
   let supplyYear = null;  // 입주물량: 단지 목록을 펼친 연도
   let sectorPeriod = "1D"; // 섹터: 등락 기간
   let KB = null;           // KB 주간 증감률 (data/kb_weekly.json, 필요할 때만 불러옴)
@@ -586,6 +589,47 @@
       <div class="note">세대수는 청약홈 모집공고의 공급(분양) 세대 기준이라 조합원·임대분이 빠져 막대 값보다 작아요.</div></div>`;
   }
 
+  // ---------- 서울·경기 아파트 신고가 (실거래가, 전용 59/84㎡대) ----------
+  // 만원 단위 → "45억", "12억 3,000만", "9,500만"
+  function manwon(v) {
+    const eok = Math.floor(v / 10000), man = v % 10000;
+    return eok ? `${eok}억${man ? ` ${fmt(man, 0)}만` : ""}` : `${fmt(man, 0)}만`;
+  }
+
+  function highsCard(id, ind) {
+    const card = cardShell(id, ind, "span-all");
+    const all = ind.items[hiView] || [];
+    const list = all.filter((h) => hiCls === "all" || String(h.cls) === hiCls);
+    const shown = list.slice(0, 20);
+    const md = (s) => { const [, m, d] = s.split("-"); return `${+m}.${+d}`; };
+    const ym = (s) => { const [y, m] = s.split("-"); return `${y.slice(2)}.${m}`; };
+    const prog = ind.progress;
+    card.insertAdjacentHTML("beforeend", `
+      <div class="kb-top">
+        <div class="seg" role="group" aria-label="지역">
+          <button type="button" data-hiview="seoul" aria-pressed="${hiView === "seoul"}">서울</button>
+          <button type="button" data-hiview="gyeonggi" aria-pressed="${hiView === "gyeonggi"}">경기</button>
+        </div>
+        <div class="seg" role="group" aria-label="전용면적">${[["all", "전체"], ["59", "전용59"], ["84", "전용84"]].map(([k, v]) => `
+          <button type="button" data-hicls="${k}" aria-pressed="${hiCls === k}">${v}</button>`).join("")}</div>
+      </div>
+      ${prog ? `<div class="hi-prog">과거 거래를 모으는 중이에요 (${prog[0]}/${prog[1]}개월). 다 모이면 신고가가 매일 표시돼요.<i style="width:${(prog[0] / prog[1]) * 100}%"></i></div>` : ""}
+      <div class="sub" style="margin-top:10px">최근 7일 신고가 ${fmt(list.length, 0)}건${list.length > 20 ? " · 상승폭 큰 20건" : ""}</div>
+      ${shown.length ? `<ol class="hi-list">${shown.map((h) => {
+        const gain = h.price - h.prev, pct = (gain / h.prev) * 100;
+        const meta = [`${h.sgg} ${h.dong}`.trim(), h.year && `${h.year}년`, h.units && `${fmt(h.units, 0)}세대`,
+          `전용 ${fmt(h.area, 2)}㎡(${h.cls === 59 ? 25 : 34}평형)`].filter(Boolean).map(esc).join(" · ");
+        return `<li>
+          <div class="hi-top"><b class="hi-nm">${esc(h.name)}</b><span class="hi-px up-t">${manwon(h.price)}</span></div>
+          <div class="hi-meta">${meta}</div>
+          <div class="hi-prev">직전 최고 ${manwon(h.prev)}${h.prevDate ? `(${ym(h.prevDate)})` : ""} · <b class="up-t">+${manwon(gain)} (+${fmt(pct, 1)}%)</b>
+            · ${md(h.date)} 계약${h.floor ? ` · ${esc(h.floor)}층` : ""}${h.direct ? ' · <span class="hi-tag">직거래</span>' : ""}</div></li>`;
+      }).join("")}</ol>` : `<div class="empty">${prog ? "아직 표시할 신고가가 없어요" : "최근 7일 신고가가 없어요"}</div>`}
+      <div class="note">국토교통부 실거래가 신고 기준이에요. 계약 후 30일 안에 신고하니 계약일은 며칠~몇 주 전일 수 있어요. 같은 단지·같은 전용면적대(59㎡대/84㎡대)에서 ${esc(longDate(ind.since))} 이후 최고가를 넘은 거래이고, 평형은 흔히 부르는 대략값이에요. 직거래는 시세와 다를 수 있어요.</div>
+      <div class="card-foot"><span>최근 7일에 새로 신고된 거래</span><span>${esc(ind.source)}</span></div>`);
+    return card;
+  }
+
   // ---------- KB 시장 분위기 지수 (중개업소 설문, 100 기준) ----------
   function kbMarketCard(id, ind) {
     const card = cardShell(id, ind, "span-2");
@@ -768,6 +812,7 @@
           : ind.type === "flow" ? flowCard(id, ind)
           : ind.type === "supply" ? supplyCard(id, ind)
           : ind.type === "kbmarket" ? kbMarketCard(id, ind)
+          : ind.type === "highs" ? highsCard(id, ind)
           : ind.type === "sectors" ? sectorCard(id, ind)
           : ind.type === "kb" ? kbCard(id, ind)
           : seriesCard(id, ind));
@@ -812,6 +857,10 @@
     if (b && b.dataset.kind !== rankKind) { rankKind = b.dataset.kind; render(); }
     const v = e.target.closest(".seg button[data-view]");
     if (v && v.dataset.view !== mapView) { mapView = v.dataset.view; render(); }
+    const hv = e.target.closest(".seg button[data-hiview]");
+    if (hv && hv.dataset.hiview !== hiView) { hiView = hv.dataset.hiview; render(); }
+    const hc = e.target.closest(".seg button[data-hicls]");
+    if (hc && hc.dataset.hicls !== hiCls) { hiCls = hc.dataset.hicls; render(); }
     const km = e.target.closest(".seg button[data-kbm]");
     if (km && km.dataset.kbm !== kbmKind) { kbmKind = km.dataset.kbm; render(); }
     const kr = e.target.closest("[data-kbmr]");

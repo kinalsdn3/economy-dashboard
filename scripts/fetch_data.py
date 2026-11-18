@@ -37,6 +37,11 @@ ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "data" / "data.json"
 SUPPLY_FILE = ROOT / "data" / "manual" / "seoul_supply.json"
 KB_FILE = ROOT / "data" / "kb_weekly.json"  # 크기가 커서(2008년~) 따로 두고 화면에서 필요할 때만 불러온다
+# 신고가 판단용 단지별 최고가표 — 사이트에 올리지 않고 GitHub Actions 캐시에 보관한다
+RT_STATE = ROOT / "state" / "rt_state.json"
+RT_START = "2019-01"         # 이 달부터의 거래로 '직전 최고가'를 판단 (2021년 고점 포함)
+RT_BUDGET = 1500             # 실행 한 번에 과거 자료 모으기에 쓸 최대 요청 수 (하루 한도 10,000회)
+RT_CLASSES = {59: "25평형", 84: "34평형"}  # 전용 59㎡대 / 84㎡대만 본다 (흔히 부르는 평형)
 KST = dt.timezone(dt.timedelta(hours=9))
 TODAY = dt.datetime.now(KST).date()
 
@@ -418,6 +423,244 @@ def kb_market():
             "asof": asof, "indexes": indexes}
 
 
+# ---------- 서울·경기 아파트 신고가 (국토교통부 실거래가) ----------
+
+def month_add(ym, n):
+    y, m = map(int, ym.split("-"))
+    y, m = divmod(y * 12 + m - 1 + n, 12)
+    return f"{y}-{m + 1:02d}"
+
+
+class ApiCodeError(RuntimeError):
+    """API 가 오류 코드로 답함 (지역 코드 문제 등). 키·호출 한도 문제는 메시지에 KEY/LIMIT 이 들어 있다."""
+
+
+def data_go(path, params):
+    """공공데이터포털 API 한 번 호출 → (항목 dict 목록, 전체 건수). XML·JSON 응답 모두 처리."""
+    raw = get_bytes(f"https://apis.data.go.kr/1613000/{path}", {"serviceKey": DATA_KEY, **params})
+    text = raw.decode("utf-8", "replace").strip()
+    if text.startswith("{"):
+        d = json.loads(text)
+        body = d.get("response", d).get("body", {})
+        items = (body.get("items") or {})
+        items = items.get("item", []) if isinstance(items, dict) else items
+        items = [items] if isinstance(items, dict) else items
+        return items, int(body.get("totalCount") or len(items))
+    root = ET.fromstring(raw)
+    code = root.findtext(".//resultCode") or root.findtext(".//returnReasonCode") or ""
+    if code not in ("000", "00", ""):
+        raise ApiCodeError(f"{path}: {code} {root.findtext('.//resultMsg') or root.findtext('.//returnAuthMsg') or ''}")
+    items = [{c.tag: (c.text or "").strip() for c in it} for it in root.iter("item")]
+    return items, int(root.findtext(".//totalCount") or len(items))
+
+
+def rt_deals(code, ym):
+    """한 시군구·한 달의 아파트 매매 신고 (전용 59/84㎡대만)."""
+    out, page = [], 1
+    while True:
+        items, total = data_go("RTMSDataSvcAptTradeDev/getRTMSDataSvcAptTradeDev",
+                               {"LAWD_CD": code, "DEAL_YMD": ym.replace("-", ""), "pageNo": page, "numOfRows": 1000})
+        for it in items:
+            try:
+                area = float(it.get("excluUseAr") or 0)
+                if int(area) not in RT_CLASSES:
+                    continue
+                date = f"{int(it['dealYear'])}-{int(it['dealMonth']):02d}-{int(it['dealDay']):02d}"
+                price = int(str(it["dealAmount"]).replace(",", "").strip())
+            except (KeyError, ValueError):
+                continue
+            seq = it.get("aptSeq") or f"{code}-{it.get('aptNm', '')}-{it.get('jibun', '')}"
+            out.append({
+                "seq": seq, "cls": int(area), "area": round(area, 2), "date": date, "price": price,
+                "floor": (it.get("floor") or "").strip(), "name": (it.get("aptNm") or "").strip(),
+                "dong": (it.get("umdNm") or "").strip(), "year": (it.get("buildYear") or "").strip(),
+                "cancel": bool((it.get("cdealType") or "").strip()), "direct": "직거래" in (it.get("dealingGbn") or ""),
+                "id": "|".join([seq, date, (it.get("floor") or "").strip(), str(price), f"{area:.2f}",
+                                (it.get("aptDong") or "").strip()]),
+            })
+        if not items or page * 1000 >= total:
+            return sorted(out, key=lambda d: d["date"])
+        page += 1
+
+
+def metro_sgg():
+    """서울·경기 시군구 코드(5자리)와 이름 — KB 지역 목록에서 가져온다 (구가 있는 시는 시 코드도 포함)."""
+    out = []
+    for code in ("11", "41"):
+        body = get_json("https://data-api.kbland.kr/bfmstat/weekMnthlyHuseTrnd/prcIndxInxrdcRt",
+                        {"월간주간구분코드": "02", "매물종별구분": "01", "매매전세코드": "01", "지역코드": code})["dataBody"]
+        for r in body["data"]["데이터리스트"]:
+            c = r["지역코드"]
+            if len(c) == 10 and c[2:5] != "000":
+                out.append([c[:5], r["지역명"]])
+    if len(out) < 60:
+        raise RuntimeError(f"서울·경기 시군구 목록 부족 ({len(out)}개)")
+    return out
+
+
+def norm_name(s):
+    return re.sub(r"[\s()\[\]·.,\-]|아파트|APT", "", s or "", flags=re.I)
+
+
+def kapt_units(state, code, deal):
+    """K-apt 공동주택 정보에서 세대수 (이름으로 단지를 맞춘다). 못 찾으면 None."""
+    lists = state.setdefault("kapt", {})
+    if code not in lists:
+        rows = None
+        for path in ("AptListService3/getSigunguAptList3", "AptListService2/getSigunguAptList"):
+            try:
+                items, _ = data_go(path, {"sigunguCode": code, "pageNo": 1, "numOfRows": 3000})
+                rows = [[i.get("kaptCode"), i.get("kaptName"), i.get("as3") or i.get("as4") or ""] for i in items]
+                break
+            except Exception:  # noqa: BLE001 - 다음 버전 주소로
+                continue
+        if rows is None:
+            raise RuntimeError("공동주택 단지 목록 API 응답 없음 (활용신청 필요)")
+        lists[code] = rows
+    target = norm_name(deal["name"])
+    cands = [r for r in lists[code] if r[0] and (norm_name(r[1]) == target
+             or (len(target) >= 3 and (target in norm_name(r[1]) or norm_name(r[1]) in target)))]
+    cands.sort(key=lambda r: (r[2] != deal["dong"], norm_name(r[1]) != target))
+    if not cands:
+        return None
+    for path in ("AptBasisInfoServiceV4/getAphusBassInfoV4", "AptBasisInfoServiceV5/getAphusBassInfoV5",
+                 "AptBasisInfoServiceV3/getAphusBassInfoV3"):
+        try:
+            items, _ = data_go(path, {"kaptCode": cands[0][0]})
+        except Exception:  # noqa: BLE001
+            continue
+        for it in items:
+            n = str(it.get("kaptdaCnt") or it.get("hoCnt") or "").replace(",", "")
+            if n.isdigit() and int(n) > 0:
+                return int(n)
+    raise RuntimeError("공동주택 기본정보 API 응답 없음 (활용신청 필요)")
+
+
+def apply_deal(state, deal, today, record):
+    """거래 하나를 최고가표에 반영. record=True 이고 최고가를 넘으면 신고가 목록에 넣는다."""
+    key = f"{deal['seq']}|{deal['cls']}"
+    best = state["max"].get(key)  # [가격, 날짜, 거래 ID, 직전 가격, 직전 날짜]
+    if deal["cancel"]:  # 해제(취소)된 거래: 최고가였다면 직전 값으로 되돌리고 신고가 목록에서 뺀다
+        if best and best[2] == deal["id"]:
+            state["max"][key] = [best[3], best[4], "", None, None] if best[3] else None
+            if state["max"][key] is None:
+                del state["max"][key]
+        state["highs"] = [h for h in state["highs"] if h["id"] != deal["id"]]
+        return
+    if best is None:
+        state["max"][key] = [deal["price"], deal["date"], deal["id"], None, None]
+    elif deal["price"] > best[0]:
+        state["max"][key] = [deal["price"], deal["date"], deal["id"], best[0], best[1]]
+        if record:
+            state["highs"].append({**{k: deal[k] for k in ("id", "seq", "cls", "area", "date", "price", "floor",
+                                                           "name", "dong", "year", "direct")},
+                                   "prev": best[0], "prevDate": best[1], "found": today})
+
+
+def apt_highs(errors):
+    """서울·경기 아파트(전용 59/84㎡대) 신고가 — 단지·면적별 최고가표를 Actions 캐시에 두고 매일 새 신고분과 비교."""
+    if not DATA_KEY:
+        raise RuntimeError("DATA_GO_KR_KEY 없음")
+    try:
+        state = json.loads(RT_STATE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        state = {}
+    if state.get("start") != RT_START:
+        state = {"start": RT_START, "next": RT_START, "pos": 0, "max": {}, "seen": {}, "highs": []}
+    if not state.get("codes"):
+        state["codes"] = metro_sgg()
+    codes = state["codes"]
+    today, this_month = TODAY.isoformat(), TODAY.strftime("%Y-%m")
+    recent = month_add(this_month, -2)  # 이 달 이후 거래는 '이미 본 거래' 목록으로 새 신고분을 가려낸다
+    recent_cut = days_ago(30).isoformat()
+    began = time.time()
+
+    def take(deals, record):
+        for d in deals:
+            if d["date"][:7] >= recent:
+                if d["id"] in state["seen"] and not d["cancel"]:
+                    continue
+                state["seen"][d["id"]] = d["date"][:7]
+            apply_deal(state, d, today, record(d))
+
+    def save():
+        RT_STATE.parent.mkdir(parents=True, exist_ok=True)
+        RT_STATE.write_text(json.dumps(state, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+    skipped = []
+
+    def deals(code, ym):
+        # 지역 코드 하나가 오류로 답하면(옛 시 코드 등) 그 지역·달만 건너뛴다.
+        # 키·한도·접속 문제면 바로 멈추고, 다음 실행 때 같은 자리부터 다시 한다 (get_bytes 가 이미 3번 재시도)
+        bad = state.setdefault("bad", {})
+        if bad.get(code, 0) >= 3:  # 세 번 연속 오류 난 코드는 더 묻지 않는다
+            return []
+        try:
+            deals_ = rt_deals(code, ym)
+            bad.pop(code, None)
+            return deals_
+        except Exception as e:  # noqa: BLE001
+            msg = f"{code}/{ym}: {e}"
+            if not isinstance(e, ApiCodeError) or re.search(r"KEY|LIMIT", str(e), re.I):
+                raise RuntimeError(f"실거래가 조회 실패 — {msg}") from None
+            bad[code] = bad.get(code, 0) + 1
+            skipped.append(msg)
+            return []
+
+    try:
+        # 1) 과거 자료 모으기: RT_START 부터 이번 달까지 한 달씩, 시군구별로 (실행마다 RT_BUDGET 만큼 이어서)
+        calls = 0
+        while state["next"] <= this_month and calls < RT_BUDGET and time.time() - began < 25 * 60:
+            code = codes[state["pos"]][0]
+            take(deals(code, state["next"]), lambda d: d["date"] >= recent_cut)  # 최근 30일 거래면 첫 목록에
+            calls += 1
+            state["pos"] += 1
+            if state["pos"] >= len(codes):
+                state["pos"], state["next"] = 0, month_add(state["next"], 1)
+
+        # 2) 다 모았으면 매일: 지난달·이번 달 신고분 중 처음 보는 거래만 비교 (신고는 계약 후 30일 안)
+        if state["next"] > this_month and calls == 0:
+            for code, _ in codes:
+                for ym in (month_add(this_month, -1), this_month):
+                    take(deals(code, ym), lambda d: True)
+    finally:  # 중간에 실패해도 여기까지 모은 최고가표는 남긴다
+        state["seen"] = {k: v for k, v in state["seen"].items() if v >= recent}
+        state["highs"] = [h for h in state["highs"] if h["found"] >= recent_cut]
+        save()
+    filling = state["next"] <= this_month
+
+    # 3) 화면에 보낼 목록: 최근 7일에 찾은 신고가, 서울·경기 각각 상승폭 큰 순 300건까지 + 세대수
+    names = dict(map(tuple, codes))
+    week = days_ago(7).isoformat()
+    units, lookups, unit_err = state.setdefault("units", {}), 0, None
+    out = {"seoul": [], "gyeonggi": []}
+    for h in sorted((h for h in state["highs"] if h["found"] >= week), key=lambda h: h["prev"] - h["price"]):
+        code = h["seq"][:5]
+        region = "seoul" if code.startswith("11") else "gyeonggi"
+        if len(out[region]) >= 300:
+            continue
+        u = units.get(h["seq"])
+        if (u is None or (u[0] is None and u[1] < days_ago(30).isoformat())) and lookups < 200 and not unit_err:
+            lookups += 1
+            try:
+                units[h["seq"]] = u = [kapt_units(state, code, h), today]
+            except Exception as e:  # noqa: BLE001 - 세대수는 없어도 보여 준다
+                unit_err = str(e)
+        out[region].append({**{k: h[k] for k in h if k not in ("id", "seq")},
+                            "sgg": names.get(code, ""), "units": u[0] if u else None})
+    if unit_err:
+        errors.append(f"re_highs 세대수: {unit_err}")
+    if skipped:
+        errors.append(f"re_highs 일부 지역 건너뜀 {len(skipped)}건: {skipped[0]}")
+    save()  # 세대수 조회 결과도 저장
+    total_months = (int(this_month[:4]) - int(RT_START[:4])) * 12 + int(this_month[5:]) - int(RT_START[5:]) + 1
+    done_months = total_months if not filling else \
+        (int(state["next"][:4]) - int(RT_START[:4])) * 12 + int(state["next"][5:]) - int(RT_START[5:])
+    return {"type": "highs", "name": "서울·경기 아파트 신고가", "freq": "D", "source": "국토교통부 실거래가",
+            "asof": today, "progress": None if not filling else [done_months, total_months],
+            "since": RT_START, "items": out}
+
+
 def period_changes(series):
     """마지막 종가 기준 1일 / 1주 / 1개월 / 연초 이후 등락률(%)."""
     last_day, last = series[-1]
@@ -698,6 +941,14 @@ def main():
         print(f"  ✓ re_kb_market ({ind['re_kb_market']['asof']})")
     except Exception as e:  # noqa: BLE001
         keep_old("re_kb_market", e)
+
+    try:
+        ind["re_highs"] = apt_highs(errors)
+        h = ind["re_highs"]
+        print(f"  ✓ re_highs (서울 {len(h['items']['seoul'])}건, 경기 {len(h['items']['gyeonggi'])}건"
+              + (f", 과거 자료 모으는 중 {h['progress'][0]}/{h['progress'][1]}개월)" if h["progress"] else ")"))
+    except Exception as e:  # noqa: BLE001 - 실패해도 최고가표는 지난 캐시 그대로
+        keep_old("re_highs", e)
 
     try:
         ind["re_supply_seoul"] = seoul_supply(errors)
