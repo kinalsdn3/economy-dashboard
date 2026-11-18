@@ -32,6 +32,8 @@ GitHub Pages로 호스팅되고, GitHub Actions가 매일 데이터를 갱신합
   `actual_until` 이하 연도는 '실적', 그 뒤는 '예정'으로 표시돼요.
 - **입주 예정 단지**: 청약홈에 없는 단지(조합원 위주 재건축 등)는 같은 파일의 `complexes`에
   `{"gu": "성북구", "name": "단지명", "units": 1200, "ym": "2027-03"}` 형식으로 추가하면 돼요.
+- **KB 증감률 표 급지 묶음**: `data/manual/kb_groups.json`의 `seoul`/`gyeonggi`에 `{"name": "1급지", "members": ["종로구", ...]}`를
+  순서대로 적으면 표가 그 순서로 묶이고 묶음마다 평균 칸이 붙어요.
 - **지도 경계**: 행정구역이 바뀌면 [vuski/admdongkor](https://github.com/vuski/admdongkor)의 최신 행정동 GeoJSON을 받아
   `pip install shapely` 후 `python scripts/build_map.py <파일>`로 `data/geo/metro.json`을 다시 만듭니다.
 
@@ -69,7 +71,7 @@ GitHub Pages로 호스팅되고, GitHub Actions가 매일 데이터를 갱신합
 
 ## 참고
 
-- 특정 탭으로 바로 가는 링크: `…/#kr`, `…/#us`, `…/#re`
+- 특정 탭으로 바로 가는 링크: `…/#kr`(한국주식), `…/#us`(미국주식), `…/#re`(주간시세), `…/#kb`(KB시계열), `…/#high`(신고가), `…/#supply`(공급·거래)
 - 어떤 지표를 못 받아오면 이전 값을 유지하고 카드에 **지연** 표시가 붙습니다.
   자세한 오류는 페이지 맨 아래에서 볼 수 있어요.
 - 지표를 추가하거나 빼려면 `scripts/fetch_data.py`의 `SERIES`와 `assets/app.js`의 `LAYOUT`을 고치면 됩니다.

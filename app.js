@@ -16,12 +16,19 @@
       { title: "금 · 해외 국채", ids: ["gold", "jgb3", "jgb10", "bund3", "bund10"] },
       { title: "물가 · 고용", ids: ["cpi", "unrate"] },
     ],
+    // 부동산: 주간시세 / KB시계열 / 신고가 / 공급·거래
     re: [
       { title: "전국 아파트 · 주간 변동률", ids: ["re_sale", "re_jeonse"] },
-      { title: "서울 · 경기 신고가 · 최근 1주", ids: ["re_highs"] },
       { title: "지역별 주간 변동률", ids: ["re_map"] },
+    ],
+    kb: [
       { title: "KB 주간 증감률 · 서울/경기", ids: ["re_kb_weekly"] },
       { title: "KB 시장 분위기 · 매수우위/거래/전세수급", ids: ["re_kb_market"] },
+    ],
+    high: [
+      { title: "서울 · 경기 신고가 · 최근 1주", ids: ["re_highs"] },
+    ],
+    supply: [
       { title: "서울 아파트 입주물량", ids: ["re_supply_seoul"] },
       { title: "거래 · 대출", ids: ["re_trade_seoul", "mortgage"] },
     ],
@@ -691,7 +698,7 @@
     // 지역 묶음(급지)은 data/manual/kb_groups.json 에서 — 없거나 깨져도 표는 기본 순서로 보여 준다
     const groups = fetch(`data/manual/kb_groups.json?v=${Date.now()}`).then((r) => r.json()).catch(() => ({}));
     kbLoading ||= Promise.all([fetch(`${ind.file}?v=${ind.asof}`).then((r) => r.json()), groups])
-      .then(([k, g]) => { KB = k; KB_GROUPS = g || {}; if (tab === "re") render(); })
+      .then(([k, g]) => { KB = k; KB_GROUPS = g || {}; if (tab === "kb") render(); })
       .catch(() => { kbLoading = null; });
     return kbLoading;
   }

@@ -25,9 +25,22 @@
       </button>
     </div>
     <nav class="tabs" role="tablist" aria-label="지표 분류">
-      <button role="tab" data-tab="kr" aria-selected="true">한국주식</button>
-      <button role="tab" data-tab="us" aria-selected="false">미국주식</button>
-      <button role="tab" data-tab="re" aria-selected="false">부동산</button>
+      <div class="tab-grp">
+        <span class="tab-lbl">주식</span>
+        <div class="tab-row">
+          <button role="tab" data-tab="kr" aria-selected="true">한국주식</button>
+          <button role="tab" data-tab="us" aria-selected="false">미국주식</button>
+        </div>
+      </div>
+      <div class="tab-grp">
+        <span class="tab-lbl">부동산</span>
+        <div class="tab-row">
+          <button role="tab" data-tab="re" aria-selected="false">주간시세</button>
+          <button role="tab" data-tab="kb" aria-selected="false">KB시계열</button>
+          <button role="tab" data-tab="high" aria-selected="false">신고가</button>
+          <button role="tab" data-tab="supply" aria-selected="false">공급·거래</button>
+        </div>
+      </div>
     </nav>
   </header>
 
@@ -35,7 +48,7 @@
 
   <footer class="foot wrap">
     <p>출처: 한국은행 ECOS · 한국부동산원 R-ONE · 국토교통부 실거래가 · 청약홈 · FRED(세인트루이스 연준) · Yahoo Finance · 네이버 증권 · KB부동산 데이터허브 · 일본 재무성 · 독일 분데스방크 · 뉴스 헤드라인 구글 뉴스</p>
-    <p>매일 오후 6시 30분(한국시간)쯤 자동 업데이트돼요. 지표마다 발표 시점이 달라 기준일이 다를 수 있어요. 투자 판단의 근거가 아닌 참고용입니다.</p>
+    <p>매일 아침 7시 10분, 저녁 6시 30분(한국시간)쯤 자동 업데이트돼요. 지표마다 발표 시점이 달라 기준일이 다를 수 있어요. 투자 판단의 근거가 아닌 참고용입니다.</p>
   </footer>
 
   <div class="tip" id="tip" role="status" hidden></div>
