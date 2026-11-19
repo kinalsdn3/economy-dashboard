@@ -20,7 +20,7 @@ GitHub Pages로 호스팅되고, GitHub Actions가 매일 데이터를 갱신합
 | | 일본 국채 3년·10년 / 독일 국채 3년·10년 | 일본 재무성 / 독일 분데스방크 (키 불필요) |
 | | 미국 CPI(전년 대비), 실업률 | FRED |
 | 부동산 | 전국 아파트 매매·전세가격지수 주간 변동률 | 한국부동산원 R-ONE |
-| | 주간 변동률 지도 (전국 17개 시도 / 서울 / 경기·인천) + 상승·하락 TOP10 (매매/전세 전환) | R-ONE, 경계: 통계청(vuski/admdongkor) |
+| | 주간 변동률 지도 (전국 17개 시도 / 서울(한강 표시) / 경기) + 상승·하락 TOP10 (매매/전세 전환) | R-ONE, 경계: 통계청(vuski/admdongkor) |
 | | KB 주간 아파트 매매·전세 증감률 표 (서울·경기 시군구, 2008년~, 시작일부터 누적) — `data/kb_weekly.json`에 따로 저장 | KB부동산 데이터허브 (키 불필요) |
 | | 서울·경기 아파트 신고가 (전용 59/84㎡대, 최근 7일, 2019년 이후 최고가 기준) — 최고가표는 Actions 캐시(`state/`)에 보관, 첫 실행 후 며칠간 과거 거래를 모음 | 국토교통부 실거래가 + 공동주택(K-apt) 세대수 |
 | | KB 시장 분위기 지수: 매수우위·매매거래·전세수급 (전국·서울·강북/강남·수도권·경기·인천 등, 최근 3년) | KB부동산 데이터허브 (키 불필요) |
@@ -35,7 +35,8 @@ GitHub Pages로 호스팅되고, GitHub Actions가 매일 데이터를 갱신합
 - **KB 증감률 표 급지 묶음**: `data/manual/kb_groups.json`의 `seoul`/`gyeonggi`에 `{"name": "1급지", "members": ["종로구", ...]}`를
   순서대로 적으면 표가 그 순서로 묶이고 묶음마다 평균 칸이 붙어요.
 - **지도 경계**: 행정구역이 바뀌면 [vuski/admdongkor](https://github.com/vuski/admdongkor)의 최신 행정동 GeoJSON을 받아
-  `pip install shapely` 후 `python scripts/build_map.py <파일>`로 `data/geo/metro.json`을 다시 만듭니다.
+  `pip install shapely` 후 `python scripts/build_map.py <파일>`로 `data/geo/metro.json`을 다시 만들고,
+  이어서 `python scripts/patch_map.py`로 서울 지도에 한강 선을 넣고 경기 지도에서 인천을 뺍니다.
 
 ## 처음 설정 (한 번만)
 
