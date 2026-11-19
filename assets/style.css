@@ -298,11 +298,11 @@ table.kb td.alt { background: color-mix(in srgb, var(--surface), var(--ink) 5%);
 .errors ul { margin: 6px 0 0; padding-left: 18px; }
 
 /* ---------- 지도 ---------- */
-:root { --map-flat: #e4e3dd; --map-none: #f3f2ef; --map-ctx: #ecebe6; }
+:root { --map-flat: #e4e3dd; --map-none: #f3f2ef; --map-ctx: #ecebe6; --river: #8ec5ea; }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) { --map-flat: #4a4a46; --map-none: #262624; --map-ctx: #2a2a28; }
+  :root:not([data-theme="light"]) { --map-flat: #4a4a46; --map-none: #262624; --map-ctx: #2a2a28; --river: #3f7fae; }
 }
-:root[data-theme="dark"] { --map-flat: #4a4a46; --map-none: #262624; --map-ctx: #2a2a28; }
+:root[data-theme="dark"] { --map-flat: #4a4a46; --map-none: #262624; --map-ctx: #2a2a28; --river: #3f7fae; }
 
 .map-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 .map-tot { display: flex; gap: 12px; font-size: 13px; color: var(--ink-2); }
@@ -318,6 +318,10 @@ svg.map path[data-k] { stroke: var(--surface); stroke-width: 1.2; vector-effect:
 svg.map path[data-k].on { stroke: var(--ink); stroke-width: 2; }
 svg.map .regions path.on { paint-order: stroke; }
 svg.map .ctx { fill: var(--map-ctx); stroke: var(--axis); stroke-width: 1; vector-effect: non-scaling-stroke; stroke-dasharray: 3 3; }
+svg.map .river, svg.map .river-bank { fill: none; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; pointer-events: none; }
+svg.map .river-bank { stroke: var(--surface); stroke-width: 9; }
+svg.map .river { stroke: var(--river); stroke-width: 6; }
+@media (min-width: 720px) { svg.map .river-bank { stroke-width: 13; } svg.map .river { stroke-width: 9; } }
 svg.map .ctx-label { font-weight: 700; fill: var(--muted); text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
 svg.map text { text-anchor: middle; pointer-events: none; font-variant-numeric: tabular-nums; }
 svg.map .mn { font-weight: 600; opacity: .85; }

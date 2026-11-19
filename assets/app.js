@@ -57,7 +57,7 @@
   const WIDE = new Set(["kr_flow", "re_sale", "re_jeonse", "re_trade_seoul", "re_kb_market"]);
   const BAR_IDS = new Set(["re_trade_seoul"]);
   const COUNT_UNITS = new Set(["건", "가구"]);
-  const MAP_VIEWS = { nation: "전국", seoul: "서울", metro: "경기 · 인천" };
+  const MAP_VIEWS = { nation: "전국", seoul: "서울", metro: "경기" };
   const KBM_KINDS = {
     buy: ["매수우위", "중개업소에 매수자와 매도자 중 누가 많은지 물어 만든 지수예요. 100보다 크면 사려는 사람이, 작으면 팔려는 사람이 많아요."],
     trade: ["매매거래", "중개업소에 매매 거래가 활발한지 한산한지 물어 만든 지수예요. 100보다 크면 활발, 작으면 한산해요."],
@@ -446,21 +446,28 @@
       return card;
     }
     const geo = GEO[mapView];
-    const list = ind.lists[mapView];
+    let list = ind.lists[mapView];
+    if (list && mapView === "metro") {  // 예전 데이터에 섞여 있던 인천은 뺀다
+      const gg = (i) => !String(i.key || "").startsWith("인천|");
+      list = { ...list, up: list.up.filter(gg), down: list.down.filter(gg) };
+    }
     if (!geo || !list) {
       card.innerHTML = `<div class="empty">다음 업데이트부터 볼 수 있어요</div>`;
       return card;
     }
     const value = (r) => ind.map[r.key];
     const scale = colorScale(geo.regions.map(value).filter((v) => v != null));
-    const named = mapView !== "metro"; // 전국·서울은 지역 이름도 지도에 적는다
-    const totals = ({ nation: ["전국"], seoul: ["서울"], metro: ["경기", "인천"] }[mapView]).map((n) => {
+    const named = true; // 지역 이름도 지도에 적는다 (안 들어가는 작은 지역은 placeMapLabels 가 숨김)
+    const totals = ({ nation: ["전국"], seoul: ["서울"], metro: ["경기"] }[mapView]).map((n) => {
       const v = ind.totals[n];
       if (v == null) return "";
       const d = dirOf(v, 2);
       return `<span>${n} <b class="${d}-t">${ARROW[d]} ${pctText(v)}</b></span>`;
     }).join("");
-    const label = (r) => (mapView === "seoul" ? r.name.replace(/구$/, "") : mapView === "nation" ? r.name : gyeonggiName(r.name));
+    // 지도 위 이름은 짧게: 서울 "강남", 경기 구는 "분당"·"수지", 경기 시군은 "과천"·"하남" (툴팁은 전체 이름)
+    const label = (r) => (mapView === "seoul" ? r.name.replace(/구$/, "")
+      : mapView === "nation" ? r.name
+      : /시.+구$/.test(r.name) ? r.name.replace(/^.+?시(.+)구$/, "$1") : r.name.replace(/[시군]$/, ""));
     const paths = geo.regions.map((r) => {
       const v = value(r);
       return `<path d="${r.d}" data-k="${esc(r.key)}" style="fill:${scale.color(v) || "var(--map-none)"}"/>`;
@@ -488,6 +495,7 @@
           <svg class="map ${mapView}" viewBox="${geo.viewBox}" role="img" aria-label="${MAP_VIEWS[mapView]} ${mapView === "nation" ? "시도" : "시군구"}별 변동률 지도">
             ${geo.context ? `<path d="${geo.context}" class="ctx"/>` : ""}
             <g class="regions">${paths}</g>
+            ${geo.river ? `<path d="${geo.river}" class="river-bank"/><path d="${geo.river}" class="river"/>` : ""}
             ${geo.context ? `<text class="ctx-label">서울</text>` : ""}
             <g class="labels">${labels}</g>
           </svg>
@@ -498,7 +506,7 @@
           <div><h4>하락 TOP10</h4>${topList(list.down, "down", 10)}</div>
         </div>
       </div>
-      <div class="card-foot"><span>${{ nation: "지도 17개 시도 · 순위 전국 시군구", seoul: "서울 25개 구", metro: "경기·인천 시군구(구)" }[mapView]} · ${list.count}개 지역 집계</span><span>${esc(ind.source)} · 경계 통계청</span></div>`;
+      <div class="card-foot"><span>${{ nation: "지도 17개 시도 · 순위 전국 시군구", seoul: "서울 25개 구 · 파란 띠 = 한강", metro: "경기 시군구(구)" }[mapView]} · ${list.count}개 지역 집계</span><span>${esc(ind.source)} · 경계 통계청</span></div>`;
 
     const svg = $("svg", card);
     const names = Object.fromEntries(geo.regions.map((r) => [r.key, r]));

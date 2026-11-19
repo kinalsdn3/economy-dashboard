@@ -331,7 +331,7 @@ def weekly_regions(statbl):
         "lists": {
             "nation": top_lists(everything),
             "seoul": top_lists(items["서울"]),
-            "metro": top_lists(items["경기"] + items["인천"]),
+            "metro": top_lists(items["경기"]),  # 지도는 경기만 (인천 제외)
         },
     }
 
